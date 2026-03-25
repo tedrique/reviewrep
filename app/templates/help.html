@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Help Centre — ReviewReply AI{% endblock %}
+{% block content %}
+<div class="max-w-3xl mx-auto px-4 py-12">
+    <h1 class="text-2xl md:text-3xl font-bold mb-2">Help Centre</h1>
+    <p class="text-gray-500 mb-10">Everything you need to know about using ReviewReply AI.</p>
+
+    <!-- Quick Start -->
+    <div class="bg-blue-50 rounded-2xl p-6 md:p-8 border border-blue-100 mb-8">
+        <h2 class="text-lg font-bold text-blue-900 mb-3">Quick Start Guide</h2>
+        <ol class="space-y-3 text-sm text-blue-800">
+            <li class="flex gap-3">
+                <span class="flex-shrink-0 w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-xs font-bold">1</span>
+                <div><strong>Add your business</strong> — Go to Dashboard, enter your business name, type and location.</div>
+            </li>
+            <li class="flex gap-3">
+                <span class="flex-shrink-0 w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-xs font-bold">2</span>
+                <div><strong>Add a review</strong> — Copy a review from Google and paste it into the "Add review" form on the left sidebar.</div>
+            </li>
+            <li class="flex gap-3">
+                <span class="flex-shrink-0 w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-xs font-bold">3</span>
+                <div><strong>Generate response</strong> — Click "Generate AI Response" and the AI will write a reply in your brand's voice.</div>
+            </li>
+            <li class="flex gap-3">
+                <span class="flex-shrink-0 w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-xs font-bold">4</span>
+                <div><strong>Approve or edit</strong> — Read the response, edit if needed, then click "Approve & Publish".</div>
+            </li>
+        </ol>
+    </div>
+
+    <!-- FAQ Sections -->
+    <div class="space-y-2">
+        <h2 class="text-lg font-bold mb-4">Frequently Asked Questions</h2>
+
+        <details class="group bg-white rounded-xl border border-gray-100 shadow-sm">
+            <summary class="cursor-pointer px-5 py-4 font-semibold text-gray-900 flex justify-between items-center text-sm">
+                How do I add reviews?
+                <span class="text-gray-400 group-open:rotate-45 transition-transform">+</span>
+            </summary>
+            <div class="px-5 pb-4 text-gray-600 text-sm">
+                <p>Currently you can add reviews manually by copying them from Google. Go to your Dashboard, use the "Add a review" form on the left sidebar — paste the reviewer's name, star rating, and review text.</p>
+                <p class="mt-2">Once Google Business integration is connected, new reviews will appear automatically.</p>
+            </div>
+        </details>
+
+        <details class="group bg-white rounded-xl border border-gray-100 shadow-sm">
+            <summary class="cursor-pointer px-5 py-4 font-semibold text-gray-900 flex justify-between items-center text-sm">
+                How do I change the tone of responses?
+                <span class="text-gray-400 group-open:rotate-45 transition-transform">+</span>
+            </summary>
+            <div class="px-5 pb-4 text-gray-600 text-sm">
+                <p>Go to <a href="/settings" class="text-blue-600 hover:underline">Settings</a> and choose your preferred tone: Friendly & Professional, Warm & Casual, or Formal & Polished. You can also set a sign-off name (e.g. "Sarah, Owner").</p>
+            </div>
+        </details>
+
+        <details class="group bg-white rounded-xl border border-gray-100 shadow-sm">
+            <summary class="cursor-pointer px-5 py-4 font-semibold text-gray-900 flex justify-between items-center text-sm">
+                Can I edit AI responses before publishing?
+                <span class="text-gray-400 group-open:rotate-45 transition-transform">+</span>
+            </summary>
+            <div class="px-5 pb-4 text-gray-600 text-sm">
+                <p>Yes, always. Every AI response appears in an editable text box. You can modify the text before clicking "Approve & Publish". You can also click "Regenerate" to get a completely new response.</p>
+            </div>
+        </details>
+
+        <details class="group bg-white rounded-xl border border-gray-100 shadow-sm">
+            <summary class="cursor-pointer px-5 py-4 font-semibold text-gray-900 flex justify-between items-center text-sm">
+                What does "Generate All Responses" do?
+                <span class="text-gray-400 group-open:rotate-45 transition-transform">+</span>
+            </summary>
+            <div class="px-5 pb-4 text-gray-600 text-sm">
+                <p>This button generates AI responses for all reviews that don't have one yet. Useful when you have multiple new reviews. You still need to approve each one individually.</p>
+            </div>
+        </details>
+
+        <details class="group bg-white rounded-xl border border-gray-100 shadow-sm">
+            <summary class="cursor-pointer px-5 py-4 font-semibold text-gray-900 flex justify-between items-center text-sm">
+                How does the AI handle negative reviews?
+                <span class="text-gray-400 group-open:rotate-45 transition-transform">+</span>
+            </summary>
+            <div class="px-5 pb-4 text-gray-600 text-sm">
+                <p>The AI is trained to respond to negative reviews with empathy — it acknowledges the issue, apologises sincerely, and invites the customer to get in touch directly. It never gets defensive or dismissive. You can always edit the response before publishing.</p>
+            </div>
+        </details>
+
+        <details class="group bg-white rounded-xl border border-gray-100 shadow-sm">
+            <summary class="cursor-pointer px-5 py-4 font-semibold text-gray-900 flex justify-between items-center text-sm">
+                How do I add team members?
+                <span class="text-gray-400 group-open:rotate-45 transition-transform">+</span>
+            </summary>
+            <div class="px-5 pb-4 text-gray-600 text-sm">
+                <p>Go to <a href="/team" class="text-blue-600 hover:underline">Team Settings</a> and invite team members by email. Staff members can view reviews and approve responses, but cannot change business settings or billing.</p>
+            </div>
+        </details>
+
+        <details class="group bg-white rounded-xl border border-gray-100 shadow-sm">
+            <summary class="cursor-pointer px-5 py-4 font-semibold text-gray-900 flex justify-between items-center text-sm">
+                What happens after my free trial ends?
+                <span class="text-gray-400 group-open:rotate-45 transition-transform">+</span>
+            </summary>
+            <div class="px-5 pb-4 text-gray-600 text-sm">
+                <p>After 7 days, you'll need to choose a plan to continue using the Service. Your data and settings are preserved — just pick a plan and carry on. If you don't subscribe, your account stays but AI generation is paused.</p>
+            </div>
+        </details>
+
+        <details class="group bg-white rounded-xl border border-gray-100 shadow-sm">
+            <summary class="cursor-pointer px-5 py-4 font-semibold text-gray-900 flex justify-between items-center text-sm">
+                How do I cancel?
+                <span class="text-gray-400 group-open:rotate-45 transition-transform">+</span>
+            </summary>
+            <div class="px-5 pb-4 text-gray-600 text-sm">
+                <p>Go to Settings → Billing → Cancel Subscription. Cancellation takes effect at the end of your current billing period. No hidden fees or cancellation charges.</p>
+            </div>
+        </details>
+    </div>
+
+    <!-- Contact Support -->
+    <div class="mt-12 bg-gray-50 rounded-2xl p-6 md:p-8 border border-gray-100 text-center">
+        <h2 class="text-lg font-bold mb-2">Still need help?</h2>
+        <p class="text-gray-500 text-sm mb-4">We typically respond within a few hours.</p>
+        <a href="/support" class="inline-block bg-gray-900 text-white px-6 py-2.5 rounded-lg text-sm font-semibold hover:bg-gray-800 transition">
+            Contact Support
+        </a>
+    </div>
+</div>
+{% endblock %}

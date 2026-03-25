@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Pricing — ReviewReply AI{% endblock %}
+{% block content %}
+<div class="max-w-4xl mx-auto px-4 py-16 text-center">
+    <h1 class="text-3xl font-bold mb-4">Simple, honest pricing</h1>
+    <p class="text-gray-600 mb-12">Start free for 7 days. No credit card needed.</p>
+
+    <div class="grid md:grid-cols-2 gap-8 max-w-3xl mx-auto">
+        <div class="bg-white p-8 rounded-xl border border-gray-200 text-left">
+            <h3 class="text-xl font-bold mb-2">Starter</h3>
+            <div class="text-4xl font-bold mb-1">£19<span class="text-lg text-gray-400">/mo</span></div>
+            <p class="text-gray-500 mb-6">For a single location</p>
+            <ul class="text-sm text-gray-600 space-y-3 mb-8">
+                <li>✓ Up to 50 AI responses per month</li>
+                <li>✓ 1 business location</li>
+                <li>✓ Tone of voice customisation</li>
+                <li>✓ One-click approve or edit</li>
+                <li>✓ British English responses</li>
+            </ul>
+            <a href="{% if user %}/billing/checkout/starter{% else %}/login{% endif %}" class="block text-center bg-gray-900 text-white py-3 rounded-lg hover:bg-gray-800">{% if user %}Subscribe — £19/mo{% else %}Start Free Trial{% endif %}</a>
+        </div>
+        <div class="bg-white p-8 rounded-xl border-2 border-blue-600 text-left relative">
+            <div class="absolute -top-3 left-1/2 -translate-x-1/2 bg-blue-600 text-white text-xs px-3 py-1 rounded-full">Most Popular</div>
+            <h3 class="text-xl font-bold mb-2">Pro</h3>
+            <div class="text-4xl font-bold mb-1">£39<span class="text-lg text-gray-400">/mo</span></div>
+            <p class="text-gray-500 mb-6">For growing businesses</p>
+            <ul class="text-sm text-gray-600 space-y-3 mb-8">
+                <li>✓ Unlimited AI responses</li>
+                <li>✓ Up to 3 business locations</li>
+                <li>✓ Advanced tone settings</li>
+                <li>✓ Priority support</li>
+                <li>✓ Response analytics</li>
+                <li>✓ Everything in Starter</li>
+            </ul>
+            <a href="{% if user %}/billing/checkout/pro{% else %}/login{% endif %}" class="block text-center bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700">{% if user %}Subscribe — £39/mo{% else %}Start Free Trial{% endif %}</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

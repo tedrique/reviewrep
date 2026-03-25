@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Getting Started — ReviewReply AI{% endblock %}
+{% block content %}
+<div class="max-w-2xl mx-auto px-4 py-12">
+
+    <div class="text-center mb-10">
+        <h1 class="text-2xl md:text-3xl font-bold mb-2">Welcome, {{ user.name }}!</h1>
+        <p class="text-gray-500">Let's get you set up in 2 minutes.</p>
+    </div>
+
+    <!-- Progress -->
+    <div class="flex items-center justify-center gap-2 mb-12">
+        {% for i in range(1, 4) %}
+        <div class="flex items-center">
+            <div class="w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold
+                {% if step >= i %}bg-blue-600 text-white{% else %}bg-gray-200 text-gray-500{% endif %}">
+                {% if step > i %}&#10003;{% else %}{{ i }}{% endif %}
+            </div>
+            {% if i < 3 %}
+            <div class="w-12 md:w-20 h-0.5 mx-1 {% if step > i %}bg-blue-600{% else %}bg-gray-200{% endif %}"></div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if step == 1 %}
+    <!-- Step 1: Add Business -->
+    <div class="bg-white rounded-2xl border border-gray-200 p-6 md:p-8">
+        <h2 class="text-xl font-bold mb-1">Add your business</h2>
+        <p class="text-gray-500 text-sm mb-6">Tell us about your business so AI can match your brand voice.</p>
+        <form method="POST" action="/onboarding/step1" class="space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Business name</label>
+                <input type="text" name="name" required placeholder="e.g. The Rose & Crown"
+                    class="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">What type of business?</label>
+                <select name="business_type" class="w-full border border-gray-300 rounded-lg px-4 py-2.5">
+                    <option value="restaurant">Restaurant / Cafe / Pub</option>
+                    <option value="salon">Hair Salon / Barber</option>
+                    <option value="clinic">Clinic / Dentist</option>
+                    <option value="hotel">Hotel / B&B</option>
+                    <option value="tradesman">Tradesman (Plumber, Electrician, etc.)</option>
+                    <option value="fitness">Gym / Fitness Studio</option>
+                    <option value="retail">Retail Shop</option>
+                    <option value="auto">Auto Service / Garage</option>
+                    <option value="other">Other</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
+                <input type="text" name="location" required placeholder="e.g. Canterbury, Kent"
+                    class="w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <button type="submit" class="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition">
+                Continue
+            </button>
+        </form>
+    </div>
+
+    {% elif step == 2 %}
+    <!-- Step 2: Set Tone -->
+    <div class="bg-white rounded-2xl border border-gray-200 p-6 md:p-8">
+        <h2 class="text-xl font-bold mb-1">Set your brand voice</h2>
+        <p class="text-gray-500 text-sm mb-6">How should your review replies sound?</p>
+        <form method="POST" action="/onboarding/step2" class="space-y-4">
+            <div class="space-y-3">
+                <label class="block border border-gray-200 rounded-xl p-4 cursor-pointer hover:border-blue-300 transition has-[:checked]:border-blue-600 has-[:checked]:bg-blue-50">
+                    <input type="radio" name="tone" value="friendly and professional" checked class="mr-2">
+                    <span class="font-semibold">Friendly & Professional</span>
+                    <p class="text-sm text-gray-500 mt-1 ml-6">Warm but polished. Works for most businesses.</p>
+                </label>
+                <label class="block border border-gray-200 rounded-xl p-4 cursor-pointer hover:border-blue-300 transition has-[:checked]:border-blue-600 has-[:checked]:bg-blue-50">
+                    <input type="radio" name="tone" value="warm and casual" class="mr-2">
+                    <span class="font-semibold">Warm & Casual</span>
+                    <p class="text-sm text-gray-500 mt-1 ml-6">Relaxed and personal. Great for cafes, salons, local shops.</p>
+                </label>
+                <label class="block border border-gray-200 rounded-xl p-4 cursor-pointer hover:border-blue-300 transition has-[:checked]:border-blue-600 has-[:checked]:bg-blue-50">
+                    <input type="radio" name="tone" value="formal and polished" class="mr-2">
+                    <span class="font-semibold">Formal & Polished</span>
+                    <p class="text-sm text-gray-500 mt-1 ml-6">Professional and measured. Ideal for clinics, law firms, hotels.</p>
+                </label>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Sign off as (optional)</label>
+                <input type="text" name="owner_name" placeholder="e.g. Sarah, Owner"
+                    class="w-full border border-gray-300 rounded-lg px-4 py-2.5">
+            </div>
+            <button type="submit" class="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition">
+                Continue
+            </button>
+        </form>
+    </div>
+
+    {% elif step == 3 %}
+    <!-- Step 3: Try It -->
+    <div class="bg-white rounded-2xl border border-gray-200 p-6 md:p-8">
+        <h2 class="text-xl font-bold mb-1">Try it out</h2>
+        <p class="text-gray-500 text-sm mb-6">Paste a real review from Google and see how AI responds.</p>
+        <form method="POST" action="/onboarding/step3" class="space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Reviewer name</label>
+                <input type="text" name="author" value="Customer" placeholder="e.g. Sarah M."
+                    class="w-full border border-gray-300 rounded-lg px-4 py-2.5">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Rating</label>
+                <select name="rating" class="w-full border border-gray-300 rounded-lg px-4 py-2.5">
+                    <option value="1">&#9733; (1 star)</option>
+                    <option value="2">&#9733;&#9733; (2 stars)</option>
+                    <option value="3" selected>&#9733;&#9733;&#9733; (3 stars)</option>
+                    <option value="4">&#9733;&#9733;&#9733;&#9733; (4 stars)</option>
+                    <option value="5">&#9733;&#9733;&#9733;&#9733;&#9733; (5 stars)</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Review text</label>
+                <textarea name="text" required rows="4" placeholder="Paste a review from Google here..."
+                    class="w-full border border-gray-300 rounded-lg px-4 py-2.5 resize-none"></textarea>
+            </div>
+            <button type="submit" class="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition">
+                Generate AI Response
+            </button>
+        </form>
+    </div>
+    {% endif %}
+
+    <p class="text-center text-sm text-gray-400 mt-6">
+        <a href="/dashboard" class="hover:text-gray-600">Skip setup and go to dashboard</a>
+    </p>
+</div>
+{% endblock %}

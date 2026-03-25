@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Privacy Policy — ReviewReply AI{% endblock %}
+{% block content %}
+<div class="max-w-3xl mx-auto px-4 py-12">
+    <h1 class="text-3xl font-bold mb-2">Privacy Policy</h1>
+    <p class="text-sm text-gray-400 mb-8">Last updated: 25 March 2026</p>
+
+    <div class="prose prose-sm text-gray-700 space-y-6">
+        <h2 class="text-lg font-semibold text-gray-900">1. Who We Are</h2>
+        <p>ReviewReply AI is operated by Stanley Grzibovskis, based in Canterbury, United Kingdom. We are the data controller for your personal data. Contact: stan.evodek@gmail.com</p>
+
+        <h2 class="text-lg font-semibold text-gray-900">2. What Data We Collect</h2>
+        <p><strong>Account data:</strong> name, email address, password hash.</p>
+        <p><strong>Business data:</strong> business name, type, location, tone preferences.</p>
+        <p><strong>Google data:</strong> when you connect Google Business Profile, we access your business reviews (reviewer name, rating, review text) and the ability to post replies. We do not access any other Google data.</p>
+        <p><strong>Usage data:</strong> pages visited, features used, generated responses.</p>
+        <p><strong>Payment data:</strong> processed by Stripe. We do not store your card details.</p>
+
+        <h2 class="text-lg font-semibold text-gray-900">3. Why We Collect It (Legal Basis)</h2>
+        <p><strong>Contract performance:</strong> to provide the Service you signed up for.</p>
+        <p><strong>Legitimate interests:</strong> to improve the Service, prevent fraud, communicate with you about your account.</p>
+        <p><strong>Consent:</strong> for marketing emails (you can unsubscribe at any time).</p>
+
+        <h2 class="text-lg font-semibold text-gray-900">4. How We Use Your Data</h2>
+        <p>We use your data to: provide AI-generated review responses; manage your account and subscription; send transactional emails (verification, welcome, notifications); improve the Service.</p>
+        <p>Review text is sent to our AI provider (Anthropic) to generate responses. Anthropic does not store or use this data for training purposes.</p>
+
+        <h2 class="text-lg font-semibold text-gray-900">5. Who We Share Data With</h2>
+        <p><strong>Anthropic (Claude API):</strong> review text is sent for AI processing. Subject to Anthropic's data usage policy — they do not train on API data.</p>
+        <p><strong>Google:</strong> approved replies are posted to your Google Business Profile on your behalf.</p>
+        <p><strong>Stripe:</strong> payment processing. Subject to Stripe's privacy policy.</p>
+        <p>We do not sell your data to any third parties. We do not share your data for advertising purposes.</p>
+
+        <h2 class="text-lg font-semibold text-gray-900">6. Data Retention</h2>
+        <p>We retain your data for as long as your account is active. If you delete your account, all personal data is deleted within 30 days. Anonymised usage data may be retained for analytics.</p>
+
+        <h2 class="text-lg font-semibold text-gray-900">7. Your Rights (UK GDPR)</h2>
+        <p>Under UK data protection law, you have the right to:</p>
+        <ul class="list-disc pl-5 space-y-1">
+            <li><strong>Access</strong> — request a copy of your personal data</li>
+            <li><strong>Rectification</strong> — correct inaccurate data</li>
+            <li><strong>Erasure</strong> — request deletion of your data</li>
+            <li><strong>Portability</strong> — receive your data in a machine-readable format</li>
+            <li><strong>Object</strong> — object to processing based on legitimate interests</li>
+            <li><strong>Withdraw consent</strong> — for marketing communications at any time</li>
+        </ul>
+        <p>To exercise any of these rights, email stan.evodek@gmail.com. We will respond within 30 days.</p>
+
+        <h2 class="text-lg font-semibold text-gray-900">8. Data Security</h2>
+        <p>We use industry-standard security measures: encrypted connections (HTTPS/TLS), secure password hashing, access controls, and regular security reviews. However, no system is 100% secure.</p>
+
+        <h2 class="text-lg font-semibold text-gray-900">9. International Transfers</h2>
+        <p>Your data may be processed by Anthropic (US) and Stripe (US). Both companies are certified under appropriate data transfer mechanisms. We ensure adequate safeguards are in place.</p>
+
+        <h2 class="text-lg font-semibold text-gray-900">10. Cookies</h2>
+        <p>We use essential cookies only — session cookies to keep you logged in. We do not use tracking cookies, advertising cookies, or third-party analytics cookies. See our <a href="/cookies" class="text-blue-600 hover:underline">Cookie Policy</a> for details.</p>
+
+        <h2 class="text-lg font-semibold text-gray-900">11. Changes</h2>
+        <p>We may update this Privacy Policy from time to time. Significant changes will be communicated via email.</p>
+
+        <h2 class="text-lg font-semibold text-gray-900">12. Complaints</h2>
+        <p>If you are unhappy with how we handle your data, you have the right to lodge a complaint with the Information Commissioner's Office (ICO): <a href="https://ico.org.uk" class="text-blue-600 hover:underline" target="_blank" rel="noopener">ico.org.uk</a></p>
+
+        <h2 class="text-lg font-semibold text-gray-900">13. Contact</h2>
+        <p><strong>Email:</strong> stan.evodek@gmail.com<br>
+        <strong>Location:</strong> Canterbury, Kent, United Kingdom</p>
+    </div>
+</div>
+{% endblock %}

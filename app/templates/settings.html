@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Settings — ReviewReply AI{% endblock %}
+{% block content %}
+<div class="max-w-2xl mx-auto px-4 py-8">
+    <h1 class="text-2xl font-bold mb-8">Settings</h1>
+
+    {% for biz in businesses %}
+    <div class="bg-white p-6 rounded-xl border border-gray-200 mb-6">
+        <h2 class="font-semibold mb-4">{{ biz.name }}</h2>
+        <form method="POST" action="/settings/business/{{ biz.id }}" class="space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Business name</label>
+                <input type="text" name="name" value="{{ biz.name }}" required
+                    class="w-full border border-gray-300 rounded-lg px-4 py-2">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Business type</label>
+                <select name="business_type" class="w-full border border-gray-300 rounded-lg px-4 py-2">
+                    {% for val, label in [("restaurant","Restaurant / Cafe / Pub"),("salon","Hair Salon / Barber"),("clinic","Clinic / Dentist"),("hotel","Hotel / B&B"),("tradesman","Tradesman"),("fitness","Gym / Fitness Studio"),("retail","Retail Shop"),("auto","Auto Service"),("other","Other")] %}
+                    <option value="{{ val }}" {% if biz.type == val %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
+                <input type="text" name="location" value="{{ biz.location }}" required
+                    class="w-full border border-gray-300 rounded-lg px-4 py-2">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Response tone</label>
+                <select name="tone" class="w-full border border-gray-300 rounded-lg px-4 py-2">
+                    {% for val, label in [("friendly and professional","Friendly & Professional"),("warm and casual","Warm & Casual"),("formal and polished","Formal & Polished")] %}
+                    <option value="{{ val }}" {% if biz.tone == val %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Sign off as (optional)</label>
+                <input type="text" name="owner_name" value="{{ biz.owner_name or '' }}" placeholder="e.g. Sarah, Owner"
+                    class="w-full border border-gray-300 rounded-lg px-4 py-2">
+            </div>
+            <button type="submit" class="bg-gray-900 text-white px-6 py-2 rounded-lg hover:bg-gray-800">
+                Save Changes
+            </button>
+        </form>
+    </div>
+    {% endfor %}
+
+    {% if not businesses %}
+    <p class="text-gray-500">No businesses added yet. <a href="/dashboard" class="text-blue-600 hover:underline">Add one from the dashboard.</a></p>
+    {% endif %}
+</div>
+{% endblock %}

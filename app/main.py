@@ -1,0 +1,558 @@
+"""ReviewReply AI — FastAPI web application."""
+from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
+from pathlib import Path
+
+from app.config import SECRET_KEY, ANTHROPIC_API_KEY, DEBUG
+from app.database import (
+    init_db, get_user, get_businesses, get_reviews,
+    create_business, add_review, save_response, approve_response,
+)
+from app.ai_responder import generate_response
+
+app = FastAPI(title="ReviewReply AI", docs_url="/docs" if DEBUG else None)
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+
+templates_dir = Path(__file__).parent / "templates"
+templates = Jinja2Templates(directory=str(templates_dir))
+
+static_dir = Path(__file__).parent / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+@app.on_event("startup")
+def startup():
+    init_db()
+
+
+# --- Helpers ---
+
+def get_current_user(request: Request) -> dict | None:
+    user_id = request.session.get("user_id")
+    if not user_id:
+        return None
+    return get_user(user_id)
+
+
+def require_auth(request: Request) -> dict:
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=302, headers={"Location": "/login"})
+    return user
+
+
+# --- Public Routes ---
+
+@app.get("/", response_class=HTMLResponse)
+async def landing(request: Request):
+    user = get_current_user(request)
+    if user:
+        return RedirectResponse("/dashboard", status_code=302)
+    return templates.TemplateResponse(request=request, name="landing.html")
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    return templates.TemplateResponse(request=request, name="login.html")
+
+
+@app.get("/pricing", response_class=HTMLResponse)
+async def pricing_page(request: Request):
+    user = get_current_user(request)
+    return templates.TemplateResponse(request=request, name="pricing.html", context={"user": user})
+
+
+# --- Google OAuth ---
+
+@app.get("/auth/google")
+async def google_login(request: Request):
+    from app.auth import get_login_url
+    return RedirectResponse(get_login_url(), status_code=302)
+
+
+@app.get("/auth/google/callback")
+async def google_callback(request: Request, code: str = "", error: str = ""):
+    if error or not code:
+        return RedirectResponse("/login", status_code=302)
+    from app.auth import exchange_code, get_user_info
+    from app.database import create_user
+    try:
+        tokens = exchange_code(code)
+        user_info = get_user_info(tokens["access_token"])
+        user_id = create_user(
+            email=user_info.get("email", ""),
+            name=user_info.get("name", ""),
+            google_id=user_info.get("id", ""),
+            access_token=tokens.get("access_token", ""),
+            refresh_token=tokens.get("refresh_token", ""),
+        )
+        request.session["user_id"] = user_id
+        try:
+            from app.email_service import send_welcome_email
+            send_welcome_email(to=user_info["email"], name=user_info.get("name", ""))
+        except Exception:
+            pass
+        # Check if user has businesses — if not, go to onboarding
+        businesses = get_businesses(user_id)
+        if not businesses:
+            return RedirectResponse("/onboarding", status_code=302)
+        return RedirectResponse("/dashboard", status_code=302)
+    except Exception as e:
+        print(f"OAuth error: {e}")
+        return RedirectResponse("/login", status_code=302)
+
+
+# --- Stripe Billing ---
+
+@app.get("/billing/checkout/{plan}")
+async def billing_checkout(request: Request, plan: str):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    from app.stripe_billing import create_checkout_session
+    url = create_checkout_session(user["email"], user["id"], plan)
+    return RedirectResponse(url, status_code=302)
+
+
+@app.get("/billing/success")
+async def billing_success(request: Request, session_id: str = ""):
+    return RedirectResponse("/dashboard", status_code=302)
+
+
+@app.get("/billing/portal")
+async def billing_portal(request: Request):
+    user = get_current_user(request)
+    if not user or not user.get("stripe_customer_id"):
+        return RedirectResponse("/pricing", status_code=302)
+    from app.stripe_billing import create_portal_session
+    url = create_portal_session(user["stripe_customer_id"])
+    return RedirectResponse(url, status_code=302)
+
+
+@app.post("/billing/webhook")
+async def billing_webhook(request: Request):
+    from app.config import STRIPE_WEBHOOK_SECRET
+    from app.stripe_billing import handle_webhook_event
+    from app.database import db_connection
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    if not STRIPE_WEBHOOK_SECRET:
+        return {"status": "no webhook secret configured"}
+    result = handle_webhook_event(payload, sig, STRIPE_WEBHOOK_SECRET)
+    if not result:
+        return {"status": "ignored"}
+    if result["event"] == "checkout_completed":
+        with db_connection() as conn:
+            conn.execute(
+                "UPDATE users SET subscription_status='active', subscription_plan=?, stripe_customer_id=? WHERE id=?",
+                (result["plan"], result["customer_id"], result["user_id"])
+            )
+    elif result["event"] == "subscription_cancelled":
+        with db_connection() as conn:
+            conn.execute(
+                "UPDATE users SET subscription_status='cancelled' WHERE stripe_customer_id=?",
+                (result["customer_id"],)
+            )
+    return {"status": "ok"}
+
+
+# --- Demo login (for MVP testing without Google OAuth) ---
+
+@app.post("/demo-login")
+async def demo_login(request: Request, email: str = Form(...), name: str = Form(...)):
+    from app.database import create_user
+    user_id = create_user(email=email, name=name, google_id=f"demo_{email}")
+    request.session["user_id"] = user_id
+
+    # Send welcome email (non-blocking, won't break if SMTP not configured)
+    try:
+        from app.email_service import send_welcome_email
+        send_welcome_email(to=email, name=name)
+    except Exception:
+        pass
+
+    return RedirectResponse("/onboarding", status_code=302)
+
+
+# --- Dashboard ---
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+
+    businesses = get_businesses(user["id"])
+    current_business = None
+    reviews = []
+
+    business_id = request.query_params.get("business_id")
+    if businesses:
+        if business_id:
+            current_business = next((b for b in businesses if str(b["id"]) == business_id), businesses[0])
+        else:
+            current_business = businesses[0]
+        reviews = get_reviews(current_business["id"])
+
+    return templates.TemplateResponse(request=request, name="dashboard.html", context={
+        "user": user,
+        "businesses": businesses,
+        "current_business": current_business,
+        "reviews": reviews,
+    })
+
+
+# --- Business Management ---
+
+@app.post("/business/add")
+async def add_business(
+    request: Request,
+    name: str = Form(...),
+    business_type: str = Form(...),
+    location: str = Form(...),
+    tone: str = Form("friendly and professional"),
+):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    create_business(user["id"], name, business_type, location, tone)
+    return RedirectResponse("/dashboard", status_code=302)
+
+
+# --- Review Management ---
+
+@app.post("/review/add")
+async def add_review_manual(
+    request: Request,
+    business_id: int = Form(...),
+    author: str = Form("Customer"),
+    rating: int = Form(...),
+    text: str = Form(...),
+):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    add_review(business_id, author, rating, text)
+    return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
+
+
+@app.post("/review/{review_id}/generate")
+async def generate_ai_response(request: Request, review_id: int):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+
+    from app.database import db_connection
+    with db_connection() as conn:
+        review = conn.execute("""
+            SELECT r.*, b.name as business_name, b.type as business_type,
+                   b.location, b.tone, b.owner_name, b.id as business_id
+            FROM reviews r JOIN businesses b ON r.business_id = b.id
+            WHERE r.id = ?
+        """, (review_id,)).fetchone()
+
+    if not review:
+        raise HTTPException(status_code=404)
+
+    ai_response = generate_response(
+        review_text=review["text"],
+        rating=review["rating"],
+        author=review["author"],
+        business_name=review["business_name"],
+        business_type=review["business_type"],
+        location=review["location"],
+        tone=review["tone"],
+        api_key=ANTHROPIC_API_KEY,
+        owner_name=review["owner_name"] or "",
+    )
+
+    save_response(review_id, ai_response)
+    return RedirectResponse(f"/dashboard?business_id={review['business_id']}", status_code=302)
+
+
+@app.post("/review/{review_id}/generate-all")
+async def generate_all_responses(request: Request, review_id: int):
+    """Generate AI responses for all reviews without one."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+
+    # Get business_id from the review
+    from app.database import db_connection
+    with db_connection() as conn:
+        review = conn.execute("SELECT business_id FROM reviews WHERE id = ?", (review_id,)).fetchone()
+        if not review:
+            raise HTTPException(status_code=404)
+        business_id = review["business_id"]
+
+        # Get all reviews without responses
+        reviews_without = conn.execute("""
+            SELECT r.*, b.name as business_name, b.type as business_type,
+                   b.location, b.tone, b.owner_name
+            FROM reviews r
+            JOIN businesses b ON r.business_id = b.id
+            LEFT JOIN responses resp ON resp.review_id = r.id
+            WHERE r.business_id = ? AND resp.id IS NULL
+        """, (business_id,)).fetchall()
+
+    for rev in reviews_without:
+        try:
+            ai_response = generate_response(
+                review_text=rev["text"],
+                rating=rev["rating"],
+                author=rev["author"],
+                business_name=rev["business_name"],
+                business_type=rev["business_type"],
+                location=rev["location"],
+                tone=rev["tone"],
+                api_key=ANTHROPIC_API_KEY,
+                owner_name=rev["owner_name"] or "",
+            )
+            save_response(rev["id"], ai_response)
+        except Exception:
+            continue
+
+    return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
+
+
+@app.post("/response/{response_id}/approve")
+async def approve(request: Request, response_id: int):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+
+    form = await request.form()
+    edited = form.get("edited_response", "")
+    approve_response(response_id, edited)
+
+    # Get business_id for redirect
+    from app.database import db_connection
+    with db_connection() as conn:
+        row = conn.execute("""
+            SELECT r.business_id FROM responses resp
+            JOIN reviews r ON resp.review_id = r.id
+            WHERE resp.id = ?
+        """, (response_id,)).fetchone()
+    business_id = row["business_id"] if row else ""
+
+    return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
+
+
+# --- Settings ---
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    businesses = get_businesses(user["id"])
+    return templates.TemplateResponse(request=request, name="settings.html", context={
+        "user": user, "businesses": businesses,
+    })
+
+
+@app.post("/settings/business/{business_id}")
+async def update_business(
+    request: Request,
+    business_id: int,
+    name: str = Form(...),
+    business_type: str = Form(...),
+    location: str = Form(...),
+    tone: str = Form("friendly and professional"),
+    owner_name: str = Form(""),
+):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    from app.database import db_connection
+    with db_connection() as conn:
+        conn.execute(
+            "UPDATE businesses SET name=?, type=?, location=?, tone=?, owner_name=? WHERE id=? AND user_id=?",
+            (name, business_type, location, tone, owner_name, business_id, user["id"])
+        )
+    return RedirectResponse("/settings", status_code=302)
+
+
+@app.get("/logout")
+async def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse("/", status_code=302)
+
+
+# --- Legal Pages ---
+
+@app.get("/terms", response_class=HTMLResponse)
+async def terms(request: Request):
+    user = get_current_user(request)
+    return templates.TemplateResponse(request=request, name="terms.html", context={"user": user})
+
+
+@app.get("/privacy", response_class=HTMLResponse)
+async def privacy(request: Request):
+    user = get_current_user(request)
+    return templates.TemplateResponse(request=request, name="privacy.html", context={"user": user})
+
+
+@app.get("/cookies", response_class=HTMLResponse)
+async def cookies(request: Request):
+    user = get_current_user(request)
+    return templates.TemplateResponse(request=request, name="cookies.html", context={"user": user})
+
+
+# --- Email Verification ---
+
+@app.get("/verify-email")
+async def verify_email(request: Request, token: str = ""):
+    if not token:
+        return RedirectResponse("/login", status_code=302)
+    from app.database import db_connection
+    with db_connection() as conn:
+        user = conn.execute("SELECT id FROM users WHERE email_token = ?", (token,)).fetchone()
+        if user:
+            conn.execute("UPDATE users SET email_verified = 1, email_token = '' WHERE id = ?", (user["id"],))
+    return RedirectResponse("/dashboard", status_code=302)
+
+
+# --- Onboarding ---
+
+@app.get("/onboarding", response_class=HTMLResponse)
+async def onboarding(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    businesses = get_businesses(user["id"])
+    step = 1 if not businesses else 3
+    return templates.TemplateResponse(request=request, name="onboarding.html", context={"user": user, "step": step})
+
+
+@app.post("/onboarding/step1")
+async def onboarding_step1(request: Request, name: str = Form(...), business_type: str = Form(...), location: str = Form(...)):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    business_id = create_business(user["id"], name, business_type, location)
+    request.session["onboarding_business_id"] = business_id
+    return templates.TemplateResponse(request=request, name="onboarding.html", context={"user": user, "step": 2})
+
+
+@app.post("/onboarding/step2")
+async def onboarding_step2(request: Request, tone: str = Form(...), owner_name: str = Form("")):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    business_id = request.session.get("onboarding_business_id")
+    if business_id:
+        from app.database import db_connection
+        with db_connection() as conn:
+            conn.execute("UPDATE businesses SET tone=?, owner_name=? WHERE id=?", (tone, owner_name, business_id))
+    return templates.TemplateResponse(request=request, name="onboarding.html", context={"user": user, "step": 3})
+
+
+@app.post("/onboarding/step3")
+async def onboarding_step3(request: Request, author: str = Form("Customer"), rating: int = Form(...), text: str = Form(...)):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    businesses = get_businesses(user["id"])
+    if not businesses:
+        return RedirectResponse("/onboarding", status_code=302)
+    business = businesses[0]
+    review_id = add_review(business["id"], author, rating, text)
+    ai_resp = generate_response(
+        review_text=text, rating=rating, author=author,
+        business_name=business["name"], business_type=business["type"],
+        location=business["location"], tone=business["tone"],
+        api_key=ANTHROPIC_API_KEY, owner_name=business.get("owner_name", ""),
+    )
+    save_response(review_id, ai_resp)
+    return RedirectResponse(f"/dashboard?business_id={business['id']}", status_code=302)
+
+
+# --- Help & Support ---
+
+@app.get("/help", response_class=HTMLResponse)
+async def help_page(request: Request):
+    user = get_current_user(request)
+    return templates.TemplateResponse(request=request, name="help.html", context={"user": user})
+
+
+@app.get("/support", response_class=HTMLResponse)
+async def support_page(request: Request):
+    user = get_current_user(request)
+    return templates.TemplateResponse(request=request, name="support.html", context={"user": user, "sent": False})
+
+
+@app.post("/support")
+async def support_submit(request: Request, email: str = Form(...), subject: str = Form(...), message: str = Form(...)):
+    user = get_current_user(request)
+    from app.database import db_connection
+    with db_connection() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS support_tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT, subject TEXT, message TEXT, status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')))")
+        conn.execute("INSERT INTO support_tickets (user_id, email, subject, message) VALUES (?, ?, ?, ?)",
+                     (user["id"] if user else None, email, subject, message))
+    try:
+        from app.email_service import send_email
+        send_email("stan.evodek@gmail.com", f"[Support] {subject} — {email}", f"<p>From: {email}</p><p>{message}</p>")
+    except Exception:
+        pass
+    return templates.TemplateResponse(request=request, name="support.html", context={"user": user, "sent": True})
+
+
+# --- Team ---
+
+@app.get("/team", response_class=HTMLResponse)
+async def team_page(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    team_members = []  # TODO: fetch from DB when team invites are implemented
+    return templates.TemplateResponse(request=request, name="team.html", context={"user": user, "team_members": team_members})
+
+
+@app.post("/team/invite")
+async def team_invite(request: Request, email: str = Form(...), role: str = Form("staff")):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    # TODO: create invite, send email
+    return RedirectResponse("/team", status_code=302)
+
+
+# --- Profile ---
+
+@app.get("/profile", response_class=HTMLResponse)
+async def profile_page(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    return templates.TemplateResponse(request=request, name="profile.html", context={"user": user})
+
+
+@app.post("/profile")
+async def profile_update(request: Request, name: str = Form(...)):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    from app.database import db_connection
+    with db_connection() as conn:
+        conn.execute("UPDATE users SET name=?, updated_at=datetime('now') WHERE id=?", (name, user["id"]))
+    return RedirectResponse("/profile", status_code=302)
+
+
+@app.post("/profile/delete")
+async def profile_delete(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    from app.database import db_connection
+    with db_connection() as conn:
+        conn.execute("DELETE FROM responses WHERE review_id IN (SELECT id FROM reviews WHERE business_id IN (SELECT id FROM businesses WHERE user_id=?))", (user["id"],))
+        conn.execute("DELETE FROM reviews WHERE business_id IN (SELECT id FROM businesses WHERE user_id=?)", (user["id"],))
+        conn.execute("DELETE FROM businesses WHERE user_id=?", (user["id"],))
+        conn.execute("DELETE FROM users WHERE id=?", (user["id"],))
+    request.session.clear()
+    return RedirectResponse("/", status_code=302)
