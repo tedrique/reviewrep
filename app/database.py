@@ -55,6 +55,10 @@ def init_db():
                 google_location_id TEXT DEFAULT '',
                 tone TEXT DEFAULT 'friendly and professional',
                 owner_name TEXT DEFAULT '',
+                auto_approve_high INTEGER DEFAULT 0,
+                banned_phrases TEXT DEFAULT '',
+                signoff_library TEXT DEFAULT '',
+                brand_facts TEXT DEFAULT '',
                 created_at TEXT DEFAULT (datetime('now'))
             );
 
@@ -78,7 +82,40 @@ def init_db():
                 published_at TEXT DEFAULT '',
                 created_at TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS notification_prefs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL REFERENCES users(id),
+                channel TEXT NOT NULL,
+                target TEXT NOT NULL,
+                events TEXT NOT NULL DEFAULT 'new_review,draft_ready',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS team_memberships (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL REFERENCES users(id),
+                member_user_id INTEGER REFERENCES users(id),
+                email TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'staff',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
         """)
+
+        # Backfill new columns for existing databases
+        for sql in [
+            "ALTER TABLE businesses ADD COLUMN auto_approve_high INTEGER DEFAULT 0",
+            "ALTER TABLE businesses ADD COLUMN banned_phrases TEXT DEFAULT ''",
+            "ALTER TABLE businesses ADD COLUMN signoff_library TEXT DEFAULT ''",
+            "ALTER TABLE businesses ADD COLUMN brand_facts TEXT DEFAULT ''",
+        ]:
+            try:
+                conn.execute(sql)
+            except Exception:
+                pass
 
 
 # --- Helper queries ---
@@ -109,11 +146,22 @@ def get_user(user_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-def create_business(user_id: int, name: str, business_type: str, location: str, tone: str = "friendly and professional") -> int:
+def create_business(
+    user_id: int,
+    name: str,
+    business_type: str,
+    location: str,
+    tone: str = "friendly and professional",
+    auto_approve_high: int = 0,
+    banned_phrases: str = "",
+    signoff_library: str = "",
+    brand_facts: str = "",
+) -> int:
     with db_connection() as conn:
         cursor = conn.execute(
-            "INSERT INTO businesses (user_id, name, type, location, tone) VALUES (?, ?, ?, ?, ?)",
-            (user_id, name, business_type, location, tone)
+            """INSERT INTO businesses (user_id, name, type, location, tone, auto_approve_high, banned_phrases, signoff_library, brand_facts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, name, business_type, location, tone, auto_approve_high, banned_phrases, signoff_library, brand_facts)
         )
         return cursor.lastrowid
 
@@ -163,6 +211,81 @@ def approve_response(response_id: int, edited_text: str = "") -> None:
             "UPDATE responses SET status = 'approved', edited_response = ?, published_at = datetime('now') WHERE id = ?",
             (edited_text, response_id)
         )
+
+
+# --- Notifications ---
+
+def get_notification_prefs(account_id: int) -> list[dict]:
+    with db_connection() as conn:
+        rows = conn.execute("SELECT * FROM notification_prefs WHERE account_id = ?", (account_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def save_notification_pref(account_id: int, channel: str, target: str, events: str) -> None:
+    with db_connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM notification_prefs WHERE account_id = ? AND channel = ?",
+            (account_id, channel)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE notification_prefs SET target = ?, events = ?, updated_at = datetime('now') WHERE id = ?",
+                (target, events, existing["id"])
+            )
+        else:
+            conn.execute(
+                "INSERT INTO notification_prefs (account_id, channel, target, events) VALUES (?, ?, ?, ?)",
+                (account_id, channel, target, events)
+            )
+
+
+# --- Team ---
+
+def create_team_invite(account_id: int, email: str, role: str) -> int:
+    with db_connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM team_memberships WHERE account_id = ? AND email = ?",
+            (account_id, email)
+        ).fetchone()
+        if existing:
+            conn.execute("UPDATE team_memberships SET role = ?, status = 'pending', updated_at = datetime('now') WHERE id = ?",
+                         (role, existing["id"]))
+            return existing["id"]
+        cur = conn.execute(
+            "INSERT INTO team_memberships (account_id, email, role, status) VALUES (?, ?, ?, 'pending')",
+            (account_id, email, role)
+        )
+        return cur.lastrowid
+
+
+def get_team_members(account_id: int) -> list[dict]:
+    with db_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM team_memberships WHERE account_id = ? ORDER BY created_at DESC",
+            (account_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def attach_member_user(email: str, user_id: int) -> dict | None:
+    """Link a logged-in user to a pending invite."""
+    with db_connection() as conn:
+        invite = conn.execute(
+            "SELECT * FROM team_memberships WHERE email = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+            (email,)
+        ).fetchone()
+        if not invite:
+            return None
+        conn.execute(
+            "UPDATE team_memberships SET member_user_id = ?, status = 'active', updated_at = datetime('now') WHERE id = ?",
+            (user_id, invite["id"])
+        )
+        return dict(invite)
+
+
+def remove_team_member(account_id: int, member_id: int) -> None:
+    with db_connection() as conn:
+        conn.execute("DELETE FROM team_memberships WHERE account_id = ? AND id = ?", (account_id, member_id))
 
 
 if __name__ == "__main__":

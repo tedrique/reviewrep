@@ -10,8 +10,11 @@ from app.config import SECRET_KEY, ANTHROPIC_API_KEY, DEBUG
 from app.database import (
     init_db, get_user, get_businesses, get_reviews,
     create_business, add_review, save_response, approve_response,
+    get_notification_prefs, save_notification_pref,
+    get_team_members, create_team_invite, attach_member_user, remove_team_member,
 )
 from app.ai_responder import generate_response
+from app.notifications import send_notifications
 
 app = FastAPI(title="ReviewReply AI", docs_url="/docs" if DEBUG else None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -36,6 +39,18 @@ def get_current_user(request: Request) -> dict | None:
     if not user_id:
         return None
     return get_user(user_id)
+
+
+def get_account_context(request: Request) -> tuple[dict | None, int | None, str]:
+    """Return (user, account_id, role). Account_id is the owner account whose data we're viewing."""
+    user = get_current_user(request)
+    if not user:
+        return None, None, ""
+    account_id = request.session.get("account_id") or user["id"]
+    role = request.session.get("role") or "owner"
+    request.session["account_id"] = account_id
+    request.session["role"] = role
+    return user, account_id, role
 
 
 def require_auth(request: Request) -> dict:
@@ -91,6 +106,14 @@ async def google_callback(request: Request, code: str = "", error: str = ""):
             refresh_token=tokens.get("refresh_token", ""),
         )
         request.session["user_id"] = user_id
+        # Link to team invitation if one exists
+        invite = attach_member_user(user_info.get("email", ""), user_id)
+        if invite:
+            request.session["account_id"] = invite["account_id"]
+            request.session["role"] = invite["role"]
+        else:
+            request.session["account_id"] = user_id
+            request.session["role"] = "owner"
         try:
             from app.email_service import send_welcome_email
             send_welcome_email(to=user_info["email"], name=user_info.get("name", ""))
@@ -110,9 +133,11 @@ async def google_callback(request: Request, code: str = "", error: str = ""):
 
 @app.get("/billing/checkout/{plan}")
 async def billing_checkout(request: Request, plan: str):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    if role == "staff":
+        return RedirectResponse("/dashboard", status_code=302)
     from app.stripe_billing import create_checkout_session
     url = create_checkout_session(user["email"], user["id"], plan)
     return RedirectResponse(url, status_code=302)
@@ -125,8 +150,8 @@ async def billing_success(request: Request, session_id: str = ""):
 
 @app.get("/billing/portal")
 async def billing_portal(request: Request):
-    user = get_current_user(request)
-    if not user or not user.get("stripe_customer_id"):
+    user, account_id, role = get_account_context(request)
+    if not user or not user.get("stripe_customer_id") or role == "staff":
         return RedirectResponse("/pricing", status_code=302)
     from app.stripe_billing import create_portal_session
     url = create_portal_session(user["stripe_customer_id"])
@@ -177,6 +202,8 @@ async def demo_login(request: Request, email: str = Form(...), name: str = Form(
 
     user_id = create_user(email=email, name=name, google_id=f"demo_{email}")
     request.session["user_id"] = user_id
+    request.session["account_id"] = user_id
+    request.session["role"] = "owner"
 
     if existing:
         # Returning user — go straight to dashboard
@@ -196,11 +223,11 @@ async def demo_login(request: Request, email: str = Form(...), name: str = Form(
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
 
-    businesses = get_businesses(user["id"])
+    businesses = get_businesses(account_id)
     current_business = None
     reviews = []
 
@@ -214,6 +241,7 @@ async def dashboard(request: Request):
 
     return templates.TemplateResponse(request=request, name="dashboard.html", context={
         "user": user,
+        "role": role,
         "businesses": businesses,
         "current_business": current_business,
         "reviews": reviews,
@@ -230,10 +258,12 @@ async def add_business(
     location: str = Form(...),
     tone: str = Form("friendly and professional"),
 ):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    create_business(user["id"], name, business_type, location, tone)
+    if role == "staff":
+        raise HTTPException(status_code=403, detail="Staff cannot add businesses")
+    create_business(account_id, name, business_type, location, tone)
     return RedirectResponse("/dashboard", status_code=302)
 
 
@@ -247,10 +277,24 @@ async def add_review_manual(
     rating: int = Form(...),
     text: str = Form(...),
 ):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    from app.database import db_connection
+    with db_connection() as conn:
+        biz = conn.execute("SELECT * FROM businesses WHERE id = ? AND user_id = ?", (business_id, account_id)).fetchone()
+        if not biz:
+            raise HTTPException(status_code=403)
     add_review(business_id, author, rating, text)
+    try:
+        send_notifications(account_id, "new_review", {
+            "business_name": biz["name"],
+            "author": author,
+            "rating": rating,
+            "text": text,
+        })
+    except Exception:
+        pass
     return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
 
 
@@ -259,7 +303,7 @@ async def add_review_manual(
 @app.post("/business/{business_id}/sync")
 async def sync_reviews(request: Request, business_id: int):
     """Pull latest reviews from Google Business Profile."""
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
 
@@ -269,7 +313,7 @@ async def sync_reviews(request: Request, business_id: int):
 
     from app.database import db_connection
     with db_connection() as conn:
-        biz = conn.execute("SELECT * FROM businesses WHERE id=? AND user_id=?", (business_id, user["id"])).fetchone()
+        biz = conn.execute("SELECT * FROM businesses WHERE id=? AND user_id=?", (business_id, account_id)).fetchone()
         if not biz or not biz["google_location_id"]:
             return RedirectResponse(f"/dashboard?business_id={business_id}&error=no_location", status_code=302)
 
@@ -294,10 +338,19 @@ async def sync_reviews(request: Request, business_id: int):
         with db_connection() as conn:
             exists = conn.execute("SELECT id FROM reviews WHERE google_review_id=? AND business_id=?",
                                   (rev["google_review_id"], business_id)).fetchone()
-            if not exists and rev["text"]:
-                add_review(business_id, rev["author"], rev["rating"], rev["text"],
-                           google_review_id=rev["google_review_id"], review_time=rev["time"])
-                imported += 1
+        if not exists and rev["text"]:
+            add_review(business_id, rev["author"], rev["rating"], rev["text"],
+                       google_review_id=rev["google_review_id"], review_time=rev["time"])
+            imported += 1
+            try:
+                send_notifications(account_id, "new_review", {
+                    "business_name": biz["name"],
+                    "author": rev["author"],
+                    "rating": rev["rating"],
+                    "text": rev["text"],
+                })
+            except Exception:
+                pass
 
     return RedirectResponse(f"/dashboard?business_id={business_id}&synced={imported}", status_code=302)
 
@@ -305,7 +358,7 @@ async def sync_reviews(request: Request, business_id: int):
 @app.post("/response/{response_id}/publish")
 async def publish_response(request: Request, response_id: int):
     """Publish an approved response to Google."""
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
 
@@ -316,8 +369,8 @@ async def publish_response(request: Request, response_id: int):
             FROM responses resp
             JOIN reviews r ON resp.review_id = r.id
             JOIN businesses b ON r.business_id = b.id
-            WHERE resp.id = ?
-        """, (response_id,)).fetchone()
+            WHERE resp.id = ? AND b.user_id = ?
+        """, (response_id, account_id)).fetchone()
 
     if not row or not row["google_review_id"] or not row["google_location_id"]:
         return RedirectResponse("/dashboard", status_code=302)
@@ -345,8 +398,8 @@ async def publish_response(request: Request, response_id: int):
 @app.get("/business/connect-google")
 async def connect_google_business(request: Request):
     """After Google OAuth, fetch user's business locations and let them pick one."""
-    user = get_current_user(request)
-    if not user or not user.get("google_access_token"):
+    user, account_id, role = get_account_context(request)
+    if not user or not user.get("google_access_token") or role == "staff":
         return RedirectResponse("/auth/google", status_code=302)
 
     from app.google_reviews import get_accounts, get_locations, refresh_access_token
@@ -377,20 +430,20 @@ async def connect_google_business(request: Request):
 @app.post("/business/link-location")
 async def link_google_location(request: Request, location_name: str = Form(...), location_title: str = Form("")):
     """Link a Google Business location to a ReviewRep business."""
-    user = get_current_user(request)
-    if not user:
+    user, account_id, role = get_account_context(request)
+    if not user or role == "staff":
         return RedirectResponse("/login", status_code=302)
 
     from app.database import db_connection
-    businesses = get_businesses(user["id"])
+    businesses = get_businesses(account_id)
 
     if businesses:
         with db_connection() as conn:
             conn.execute("UPDATE businesses SET google_location_id=? WHERE id=?",
                          (location_name, businesses[0]["id"]))
     else:
-        create_business(user["id"], location_title or "My Business", "other", "", "friendly and professional")
-        businesses = get_businesses(user["id"])
+        create_business(account_id, location_title or "My Business", "other", "", "friendly and professional")
+        businesses = get_businesses(account_id)
         with db_connection() as conn:
             conn.execute("UPDATE businesses SET google_location_id=? WHERE id=?",
                          (location_name, businesses[0]["id"]))
@@ -400,7 +453,7 @@ async def link_google_location(request: Request, location_name: str = Form(...),
 
 @app.post("/review/{review_id}/generate")
 async def generate_ai_response(request: Request, review_id: int):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
 
@@ -408,10 +461,11 @@ async def generate_ai_response(request: Request, review_id: int):
     with db_connection() as conn:
         review = conn.execute("""
             SELECT r.*, b.name as business_name, b.type as business_type,
-                   b.location, b.tone, b.owner_name, b.id as business_id
+                   b.location, b.tone, b.owner_name, b.id as business_id,
+                   b.auto_approve_high, b.banned_phrases, b.signoff_library, b.brand_facts
             FROM reviews r JOIN businesses b ON r.business_id = b.id
-            WHERE r.id = ?
-        """, (review_id,)).fetchone()
+            WHERE r.id = ? AND b.user_id = ?
+        """, (review_id, account_id)).fetchone()
 
     if not review:
         raise HTTPException(status_code=404)
@@ -426,16 +480,38 @@ async def generate_ai_response(request: Request, review_id: int):
         tone=review["tone"],
         api_key=ANTHROPIC_API_KEY,
         owner_name=review["owner_name"] or "",
+        banned_phrases=review["banned_phrases"] or "",
+        signoff_library=review["signoff_library"] or "",
+        brand_facts=review["brand_facts"] or "",
     )
 
-    save_response(review_id, ai_response)
+    response_id = save_response(review_id, ai_response)
+    if review["auto_approve_high"] and review["rating"] >= 4:
+        approve_response(response_id, ai_response)
+        try:
+            send_notifications(account_id, "approved", {
+                "business_name": review["business_name"],
+                "rating": review["rating"],
+                "author": review["author"],
+            })
+        except Exception:
+            pass
+    else:
+        try:
+            send_notifications(account_id, "draft_ready", {
+                "business_name": review["business_name"],
+                "rating": review["rating"],
+                "author": review["author"],
+            })
+        except Exception:
+            pass
     return RedirectResponse(f"/dashboard?business_id={review['business_id']}", status_code=302)
 
 
 @app.post("/review/{review_id}/generate-all")
 async def generate_all_responses(request: Request, review_id: int):
     """Generate AI responses for all reviews without one."""
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
 
@@ -450,12 +526,13 @@ async def generate_all_responses(request: Request, review_id: int):
         # Get all reviews without responses
         reviews_without = conn.execute("""
             SELECT r.*, b.name as business_name, b.type as business_type,
-                   b.location, b.tone, b.owner_name
+                   b.location, b.tone, b.owner_name,
+                   b.auto_approve_high, b.banned_phrases, b.signoff_library, b.brand_facts
             FROM reviews r
             JOIN businesses b ON r.business_id = b.id
             LEFT JOIN responses resp ON resp.review_id = r.id
-            WHERE r.business_id = ? AND resp.id IS NULL
-        """, (business_id,)).fetchall()
+            WHERE r.business_id = ? AND b.user_id = ? AND resp.id IS NULL
+        """, (business_id, account_id)).fetchall()
 
     for rev in reviews_without:
         try:
@@ -469,8 +546,21 @@ async def generate_all_responses(request: Request, review_id: int):
                 tone=rev["tone"],
                 api_key=ANTHROPIC_API_KEY,
                 owner_name=rev["owner_name"] or "",
+                banned_phrases=rev["banned_phrases"] or "",
+                signoff_library=rev["signoff_library"] or "",
+                brand_facts=rev["brand_facts"] or "",
             )
-            save_response(rev["id"], ai_response)
+            resp_id = save_response(rev["id"], ai_response)
+            if rev["auto_approve_high"] and rev["rating"] >= 4:
+                approve_response(resp_id, ai_response)
+                try:
+                    send_notifications(account_id, "approved", {
+                        "business_name": rev["business_name"],
+                        "rating": rev["rating"],
+                        "author": rev["author"],
+                    })
+                except Exception:
+                    pass
         except Exception:
             continue
 
@@ -479,7 +569,7 @@ async def generate_all_responses(request: Request, review_id: int):
 
 @app.post("/response/{response_id}/approve")
 async def approve(request: Request, response_id: int):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
 
@@ -492,7 +582,7 @@ async def approve(request: Request, response_id: int):
     with db_connection() as conn:
         total_approved = conn.execute(
             "SELECT COUNT(*) as c FROM responses resp JOIN reviews r ON resp.review_id = r.id JOIN businesses b ON r.business_id = b.id WHERE b.user_id = ? AND resp.status = 'approved'",
-            (user["id"],)
+            (account_id,)
         ).fetchone()["c"]
         if total_approved == 1:
             return RedirectResponse("/welcome", status_code=302)
@@ -502,9 +592,17 @@ async def approve(request: Request, response_id: int):
         row = conn.execute("""
             SELECT r.business_id FROM responses resp
             JOIN reviews r ON resp.review_id = r.id
-            WHERE resp.id = ?
-        """, (response_id,)).fetchone()
+            JOIN businesses b ON r.business_id = b.id
+            WHERE resp.id = ? AND b.user_id = ?
+        """, (response_id, account_id)).fetchone()
     business_id = row["business_id"] if row else ""
+
+    try:
+        send_notifications(account_id, "approved", {
+            "business_id": business_id,
+        })
+    except Exception:
+        pass
 
     return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
 
@@ -513,12 +611,13 @@ async def approve(request: Request, response_id: int):
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    businesses = get_businesses(user["id"])
+    businesses = get_businesses(account_id)
+    notifications = get_notification_prefs(account_id)
     return templates.TemplateResponse(request=request, name="settings.html", context={
-        "user": user, "businesses": businesses,
+        "user": user, "role": role, "businesses": businesses, "notifications": notifications,
     })
 
 
@@ -531,16 +630,47 @@ async def update_business(
     location: str = Form(...),
     tone: str = Form("friendly and professional"),
     owner_name: str = Form(""),
+    auto_approve_high: int = Form(0),
+    banned_phrases: str = Form(""),
+    signoff_library: str = Form(""),
+    brand_facts: str = Form(""),
 ):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    if role == "staff":
+        raise HTTPException(status_code=403)
     from app.database import db_connection
     with db_connection() as conn:
         conn.execute(
-            "UPDATE businesses SET name=?, type=?, location=?, tone=?, owner_name=? WHERE id=? AND user_id=?",
-            (name, business_type, location, tone, owner_name, business_id, user["id"])
+            """UPDATE businesses SET name=?, type=?, location=?, tone=?, owner_name=?, auto_approve_high=?, banned_phrases=?, signoff_library=?, brand_facts=?
+               WHERE id=? AND user_id=?""",
+            (name, business_type, location, tone, owner_name, int(auto_approve_high), banned_phrases, signoff_library, brand_facts, business_id, account_id)
         )
+    return RedirectResponse("/settings", status_code=302)
+
+
+@app.post("/settings/notifications")
+async def update_notifications(request: Request):
+    user, account_id, role = get_account_context(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    if role == "staff":
+        raise HTTPException(status_code=403)
+    form = await request.form()
+    events = form.getlist("events")
+    events_str = ",".join(events) if events else "new_review,draft_ready,approved"
+    email_target = form.get("email_target", "").strip()
+    slack_webhook = form.get("slack_webhook", "").strip()
+    telegram_target = form.get("telegram_target", "").strip()  # format: token:chat_id
+
+    if email_target:
+        save_notification_pref(account_id, "email", email_target, events_str)
+    if slack_webhook:
+        save_notification_pref(account_id, "slack", slack_webhook, events_str)
+    if telegram_target:
+        save_notification_pref(account_id, "telegram", telegram_target, events_str)
+
     return RedirectResponse("/settings", status_code=302)
 
 
@@ -588,27 +718,27 @@ async def verify_email(request: Request, token: str = ""):
 
 @app.get("/onboarding", response_class=HTMLResponse)
 async def onboarding(request: Request):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    businesses = get_businesses(user["id"])
+    businesses = get_businesses(account_id)
     step = 1 if not businesses else 3
     return templates.TemplateResponse(request=request, name="onboarding.html", context={"user": user, "step": step})
 
 
 @app.post("/onboarding/step1")
 async def onboarding_step1(request: Request, name: str = Form(...), business_type: str = Form(...), location: str = Form(...)):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    business_id = create_business(user["id"], name, business_type, location)
+    business_id = create_business(account_id, name, business_type, location)
     request.session["onboarding_business_id"] = business_id
     return templates.TemplateResponse(request=request, name="onboarding.html", context={"user": user, "step": 2})
 
 
 @app.post("/onboarding/step2")
 async def onboarding_step2(request: Request, tone: str = Form(...), owner_name: str = Form("")):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
     business_id = request.session.get("onboarding_business_id")
@@ -621,10 +751,10 @@ async def onboarding_step2(request: Request, tone: str = Form(...), owner_name: 
 
 @app.post("/onboarding/step3")
 async def onboarding_step3(request: Request, author: str = Form("Customer"), rating: int = Form(...), text: str = Form(...)):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    businesses = get_businesses(user["id"])
+    businesses = get_businesses(account_id)
     if not businesses:
         return RedirectResponse("/onboarding", status_code=302)
     business = businesses[0]
@@ -681,19 +811,35 @@ async def support_submit(request: Request, email: str = Form(...), subject: str 
 
 @app.get("/team", response_class=HTMLResponse)
 async def team_page(request: Request):
-    user = get_current_user(request)
+    user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    team_members = []  # TODO: fetch from DB when team invites are implemented
-    return templates.TemplateResponse(request=request, name="team.html", context={"user": user, "team_members": team_members})
+    team_members = get_team_members(account_id)
+    return templates.TemplateResponse(request=request, name="team.html", context={"user": user, "role": role, "team_members": team_members})
 
 
 @app.post("/team/invite")
 async def team_invite(request: Request, email: str = Form(...), role: str = Form("staff")):
-    user = get_current_user(request)
+    user, account_id, user_role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    # TODO: create invite, send email
+    if user_role == "staff":
+        raise HTTPException(status_code=403)
+    create_team_invite(account_id, email, role)
+    try:
+        from app.email_service import send_email
+        send_email(email, f"You're invited to ReviewReply AI ({role})", f"<p>{user['email']} invited you to collaborate on review replies.</p><p>Sign up with this email to join.</p>")
+    except Exception:
+        pass
+    return RedirectResponse("/team", status_code=302)
+
+
+@app.post("/team/remove/{member_id}")
+async def team_remove(request: Request, member_id: int):
+    user, account_id, role = get_account_context(request)
+    if not user or role == "staff":
+        return RedirectResponse("/login", status_code=302)
+    remove_team_member(account_id, member_id)
     return RedirectResponse("/team", status_code=302)
 
 

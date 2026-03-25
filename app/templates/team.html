@@ -39,16 +39,23 @@
         {% for member in team_members %}
         <div class="px-6 py-4 flex items-center justify-between border-b border-gray-50">
             <div>
-                <div class="font-medium">{{ member.name or member.email }}</div>
-                <div class="text-sm text-gray-400">{{ member.email }}</div>
+                <div class="font-medium">{{ member.email }}</div>
+                {% if member.member_user_id %}
+                <div class="text-xs text-gray-400">Joined</div>
+                {% endif %}
             </div>
             <div class="flex items-center gap-3">
                 <span class="{% if member.role == 'admin' %}bg-blue-100 text-blue-700{% else %}bg-gray-100 text-gray-600{% endif %} text-xs font-semibold px-3 py-1 rounded-full">
                     {{ member.role|capitalize }}
                 </span>
+                <span class="text-xs px-2 py-0.5 rounded-full {% if member.status == 'active' %}bg-green-100 text-green-700{% else %}bg-yellow-100 text-yellow-700{% endif %}">
+                    {{ member.status }}
+                </span>
+                {% if role != 'staff' %}
                 <form method="POST" action="/team/remove/{{ member.id }}">
                     <button type="submit" class="text-red-400 hover:text-red-600 text-sm">Remove</button>
                 </form>
+                {% endif %}
             </div>
         </div>
         {% endfor %}

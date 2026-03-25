@@ -33,6 +33,9 @@ def generate_response(
     tone: str = "friendly and professional",
     api_key: str = "",
     owner_name: str = "",
+    banned_phrases: str = "",
+    signoff_library: str = "",
+    brand_facts: str = "",
 ) -> str:
     """Generate an AI response to a review using Claude."""
 
@@ -47,6 +50,12 @@ def generate_response(
 
     if owner_name:
         system += f"\nSign off as: {owner_name}"
+    if banned_phrases:
+        system += f"\nNever use these phrases: {banned_phrases}"
+    if signoff_library:
+        system += f"\nPick a natural sign-off from: {signoff_library}"
+    if brand_facts:
+        system += f"\nBrand facts to weave in when relevant: {brand_facts}"
 
     user_msg = f"""Review by {author} ({rating} star{'s' if rating != 1 else ''}):
 "{review_text}"
@@ -82,6 +91,9 @@ def generate_response_batch(
                 tone=business_config.get("tone", "friendly and professional"),
                 api_key=api_key,
                 owner_name=business_config.get("owner_name", ""),
+                banned_phrases=business_config.get("banned_phrases", ""),
+                signoff_library=business_config.get("signoff_library", ""),
+                brand_facts=business_config.get("brand_facts", ""),
             )
             results.append({
                 **review,

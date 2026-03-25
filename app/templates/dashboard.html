@@ -3,11 +3,38 @@
 {% block content %}
 <div class="max-w-6xl mx-auto px-4 py-8">
 
-    <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3 mb-8">
-        <h1 class="text-2xl font-bold">Your Reviews</h1>
+    <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
+        <div>
+            <div class="flex items-center gap-3">
+                <h1 class="text-2xl font-bold">Your Reviews</h1>
+                {% set status = (user.subscription_status or 'trial') | lower %}
+                {% set plan = user.subscription_plan or 'starter' %}
+                <span class="text-xs px-3 py-1 rounded-full border
+                    {% if status == 'active' %}bg-green-50 border-green-200 text-green-700
+                    {% elif status == 'trial' %}bg-blue-50 border-blue-200 text-blue-700
+                    {% else %}bg-gray-50 border-gray-200 text-gray-600{% endif %}">
+                    {{ plan|capitalize }} · {{ status }}
+                </span>
+            </div>
+            <p class="text-sm text-gray-500 mt-1">Keep approvals under 10s — higher reply rate lifts your Google ranking.</p>
+        </div>
+
         {% if current_business %}
-        <div class="flex items-center gap-3">
+        <div class="flex flex-wrap items-center gap-2 md:gap-3">
+            {% if businesses|length > 1 %}
+            <form method="GET" action="/dashboard" class="flex items-center gap-2">
+                <label for="biz-switcher" class="text-xs text-gray-500">Location</label>
+                <select id="biz-switcher" name="business_id" onchange="this.form.submit()"
+                        class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                    {% for biz in businesses %}
+                    <option value="{{ biz.id }}" {% if biz.id == current_business.id %}selected{% endif %}>{{ biz.name }}</option>
+                    {% endfor %}
+                </select>
+            </form>
+            {% else %}
             <span class="text-sm text-gray-500">{{ current_business.name }}</span>
+            {% endif %}
+
             {% if current_business.google_location_id %}
             <form method="POST" action="/business/{{ current_business.id }}/sync" class="inline">
                 <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded-lg text-xs font-semibold hover:bg-blue-700 transition">
@@ -19,6 +46,10 @@
                 Connect Google Business
             </a>
             {% endif %}
+
+            <a href="/pricing" class="text-xs text-blue-600 font-semibold border border-blue-200 bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100">
+                Upgrade / Manage plan
+            </a>
         </div>
         {% endif %}
     </div>
@@ -69,6 +100,51 @@
 
     {% else %}
     <!-- Main dashboard -->
+    {% set stats = namespace(total=0, pending=0, missing=0, negative=0) %}
+    {% for r in reviews %}
+        {% set stats.total = stats.total + 1 %}
+        {% if r.response_status != 'approved' %}{% set stats.pending = stats.pending + 1 %}{% endif %}
+        {% if not r.ai_response %}{% set stats.missing = stats.missing + 1 %}{% endif %}
+        {% if r.rating <= 2 %}{% set stats.negative = stats.negative + 1 %}{% endif %}
+    {% endfor %}
+
+    <div class="grid md:grid-cols-4 gap-3 md:gap-4 mb-6">
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-sm text-gray-500">Pending approval</div>
+            <div class="text-2xl font-bold text-gray-900">{{ stats.pending }}</div>
+        </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-sm text-gray-500">Need AI draft</div>
+            <div class="text-2xl font-bold text-gray-900">{{ stats.missing }}</div>
+        </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-sm text-gray-500">1–2★ to rescue</div>
+            <div class="text-2xl font-bold text-rose-600">{{ stats.negative }}</div>
+        </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-sm text-gray-500">Total reviews</div>
+            <div class="text-2xl font-bold text-gray-900">{{ stats.total }}</div>
+        </div>
+    </div>
+
+    <div class="bg-white rounded-xl border border-gray-200 p-3 md:p-4 mb-6 flex flex-wrap items-center gap-2 md:gap-3 text-sm">
+        <span class="text-gray-500 mr-1">Quick filters:</span>
+        <button type="button" data-filter="all" class="filter-btn bg-gray-900 text-white px-3 py-1.5 rounded-lg">All</button>
+        <button type="button" data-filter="pending" class="filter-btn bg-gray-100 text-gray-700 px-3 py-1.5 rounded-lg">Pending</button>
+        <button type="button" data-filter="no-response" class="filter-btn bg-gray-100 text-gray-700 px-3 py-1.5 rounded-lg">No AI draft</button>
+        <button type="button" data-filter="approved" class="filter-btn bg-gray-100 text-gray-700 px-3 py-1.5 rounded-lg">Approved</button>
+        <button type="button" data-filter="neg" class="filter-btn bg-rose-50 text-rose-700 px-3 py-1.5 rounded-lg">1–2★</button>
+        <button type="button" data-filter="mid" class="filter-btn bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg">3★</button>
+        <button type="button" data-filter="pos" class="filter-btn bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-lg">4–5★</button>
+        {% if reviews %}
+        <form method="POST" action="/review/{{ reviews[0].id }}/generate-all" class="ml-auto">
+            <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-blue-700">
+                Generate All Responses
+            </button>
+        </form>
+        {% endif %}
+    </div>
+
     <div class="grid md:grid-cols-4 gap-6">
 
         <!-- Sidebar: Add review -->
@@ -94,13 +170,6 @@
                 </form>
             </div>
 
-            {% if reviews %}
-            <form method="POST" action="/review/{{ reviews[0].id }}/generate-all">
-                <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded-lg text-sm hover:bg-blue-700">
-                    Generate All Responses
-                </button>
-            </form>
-            {% endif %}
         </div>
 
         <!-- Reviews list -->
@@ -112,7 +181,10 @@
             {% endif %}
 
             {% for review in reviews %}
-            <div class="bg-white p-6 rounded-xl border border-gray-200">
+            <div class="bg-white p-6 rounded-xl border border-gray-200 review-card"
+                 data-rating="{{ review.rating }}"
+                 data-status="{{ review.response_status or 'none' }}"
+                 data-has-response="{{ 'yes' if review.ai_response else 'no' }}">
                 <!-- Review header -->
                 <div class="flex justify-between items-start mb-3">
                     <div>
@@ -143,17 +215,16 @@
                     {% if review.response_status == 'approved' %}
                     <p class="text-sm text-gray-700">{{ review.edited_response or review.ai_response }}</p>
                     {% else %}
-                    <form method="POST" action="/response/{{ review.response_id }}/approve">
-                        <textarea name="edited_response" class="w-full border border-blue-200 rounded-lg px-4 py-3 text-sm mb-3 min-h-[120px] resize-y leading-relaxed">{{ review.ai_response }}</textarea>
+                    <form method="POST" action="/response/{{ review.response_id }}/approve" class="space-y-3">
+                        <textarea name="edited_response" class="w-full border border-blue-200 rounded-lg px-4 py-3 text-sm min-h-[120px] resize-y leading-relaxed">{{ review.ai_response }}</textarea>
                         <div class="flex gap-2">
                             <button type="submit" class="bg-green-600 text-white px-4 py-1.5 rounded-lg text-sm hover:bg-green-700">
                                 Approve & Publish
                             </button>
-                            <form method="POST" action="/review/{{ review.id }}/generate" class="inline">
-                                <button type="submit" class="bg-gray-200 text-gray-700 px-4 py-1.5 rounded-lg text-sm hover:bg-gray-300">
-                                    Regenerate
-                                </button>
-                            </form>
+                            <button type="submit" formaction="/review/{{ review.id }}/generate" formmethod="POST"
+                                class="bg-gray-200 text-gray-700 px-4 py-1.5 rounded-lg text-sm hover:bg-gray-300">
+                                Regenerate
+                            </button>
                         </div>
                     </form>
                     {% endif %}
@@ -171,4 +242,45 @@
     </div>
     {% endif %}
 </div>
+
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const buttons = document.querySelectorAll(".filter-btn");
+    const cards = document.querySelectorAll(".review-card");
+
+    function setActive(btn) {
+        buttons.forEach(b => b.classList.remove("bg-gray-900", "text-white", "ring-2", "ring-gray-800"));
+        btn.classList.add("bg-gray-900", "text-white", "ring-2", "ring-gray-800");
+    }
+
+    function applyFilter(filter) {
+        cards.forEach(card => {
+            const rating = parseInt(card.dataset.rating, 10);
+            const status = card.dataset.status;
+            const hasResponse = card.dataset.hasResponse === "yes";
+            let show = true;
+            if (filter === "pending") show = status !== "approved";
+            if (filter === "approved") show = status === "approved";
+            if (filter === "no-response") show = !hasResponse;
+            if (filter === "neg") show = rating <= 2;
+            if (filter === "mid") show = rating === 3;
+            if (filter === "pos") show = rating >= 4;
+            card.classList.toggle("hidden", !show);
+        });
+    }
+
+    buttons.forEach(btn => {
+        btn.addEventListener("click", () => {
+            setActive(btn);
+            applyFilter(btn.dataset.filter);
+        });
+    });
+
+    // Default state
+    if (buttons.length) {
+        setActive(buttons[0]);
+        applyFilter(buttons[0].dataset.filter);
+    }
+});
+</script>
 {% endblock %}
