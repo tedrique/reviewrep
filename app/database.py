@@ -135,6 +135,14 @@ def init_db():
                 error TEXT NOT NULL,
                 created_at TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS review_comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                review_id INTEGER NOT NULL REFERENCES reviews(id),
+                user_id INTEGER,
+                text TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
         """)
 
         # Backfill new columns for existing databases
@@ -325,6 +333,37 @@ def approve_response(response_id: int, edited_text: str = "") -> None:
             "UPDATE responses SET status = 'approved', edited_response = ?, published_at = datetime('now') WHERE id = ?",
             (edited_text, response_id)
         )
+
+
+# --- Comments ---
+
+
+def add_comment(review_id: int, user_id: int | None, text: str) -> int:
+    with db_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO review_comments (review_id, user_id, text, created_at) VALUES (?, ?, ?, datetime('now'))",
+            (review_id, user_id, text)
+        )
+        return cur.lastrowid
+
+
+def get_comments_by_review_ids(review_ids: list[int]) -> dict[int, list[dict]]:
+    if not review_ids:
+        return {}
+    placeholders = ",".join("?" for _ in review_ids)
+    sql = f"""
+        SELECT rc.*, u.name as user_name, u.email as user_email
+        FROM review_comments rc
+        LEFT JOIN users u ON rc.user_id = u.id
+        WHERE rc.review_id IN ({placeholders})
+        ORDER BY rc.created_at ASC
+    """
+    with db_connection() as conn:
+        rows = conn.execute(sql, review_ids).fetchall()
+        grouped: dict[int, list[dict]] = {}
+        for r in rows:
+            grouped.setdefault(r["review_id"], []).append(dict(r))
+        return grouped
 
 
 # --- Notifications ---

@@ -66,7 +66,25 @@
         {% block content %}{% endblock %}
     </main>
     <script src="/static/chart.js"></script>
+    <div id="toast" class="hidden fixed bottom-5 left-1/2 -translate-x-1/2 bg-white border shadow-lg rounded-xl px-4 py-3 text-sm min-w-[260px] max-w-[420px] z-50"></div>
     <script>
+    function showToast(message, kind="info") {
+        const el = document.getElementById("toast");
+        if (!el) return;
+        el.classList.remove("hidden", "border-blue-200", "text-blue-700", "bg-blue-50", "border-emerald-200", "text-emerald-700", "bg-emerald-50", "border-rose-200", "text-rose-700", "bg-rose-50");
+        if (kind === "error") {
+            el.classList.add("border-rose-200","text-rose-700","bg-rose-50");
+        } else if (kind === "success") {
+            el.classList.add("border-emerald-200","text-emerald-700","bg-emerald-50");
+        } else {
+            el.classList.add("border-blue-200","text-blue-700","bg-blue-50");
+        }
+        el.textContent = message;
+        el.style.opacity = "1";
+        setTimeout(() => { el.style.opacity = "0"; }, 3200);
+        setTimeout(() => { el.classList.add("hidden"); el.style.opacity = "1"; }, 3600);
+    }
+
     function pollTask(taskId) {
         if (!taskId) return;
         const banner = document.getElementById('task-banner');
@@ -82,8 +100,10 @@
                 banner.classList.remove('bg-white','text-blue-700','border-blue-200');
                 if (data.state === 'FAILURE') {
                     banner.classList.add('bg-rose-50','text-rose-700','border-rose-200');
+                    showToast(`Task failed: ${data.result || 'see logs'}`, "error");
                 } else {
                     banner.classList.add('bg-emerald-50','text-emerald-700','border-emerald-200');
+                    showToast("Task completed successfully", "success");
                 }
                 setTimeout(() => window.location.reload(), data.state === 'SUCCESS' ? 1200 : 4000);
             } else {
@@ -115,6 +135,12 @@
     if (taskParam) {
         pollTask(taskParam);
     }
+    // Query param toasts (?error=... or ?success=...)
+    (function() {
+        const p = new URLSearchParams(window.location.search);
+        if (p.get("error")) showToast(p.get("error"), "error");
+        if (p.get("success")) showToast(p.get("success"), "success");
+    })();
     </script>
 </body>
 </html>

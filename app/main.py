@@ -1,4 +1,5 @@
 """ReviewReply AI — FastAPI web application."""
+import os
 from fastapi import FastAPI, Request, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +17,7 @@ from app.database import (
     get_notification_prefs, save_notification_pref,
     get_team_members, create_team_invite, attach_member_user, remove_team_member,
     add_audit, count_responses_this_month, get_dead_letters,
+    add_comment, get_comments_by_review_ids,
 )
 from app.ai_responder import generate_response
 from app.notifications import send_notifications
@@ -193,7 +195,7 @@ async def billing_checkout(request: Request, plan: str):
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    if role == "staff":
+    if role in ("staff", "suggest"):
         return RedirectResponse("/dashboard", status_code=302)
     from app.stripe_billing import create_checkout_session
     url = create_checkout_session(user["email"], user["id"], plan)
@@ -215,7 +217,7 @@ async def task_status(task_id: str):
 @app.get("/billing/portal")
 async def billing_portal(request: Request):
     user, account_id, role = get_account_context(request)
-    if not user or not user.get("stripe_customer_id") or role == "staff":
+    if not user or not user.get("stripe_customer_id") or role in ("staff", "suggest"):
         return RedirectResponse("/pricing", status_code=302)
     from app.stripe_billing import create_portal_session
     url = create_portal_session(user["stripe_customer_id"])
@@ -356,6 +358,7 @@ async def dashboard(request: Request):
             rating_filter=rating_filter,
             search=search,
         )
+        comments = get_comments_by_review_ids([r["id"] for r in reviews])
         total_pages = max(1, (total + per_page - 1) // per_page)
         # Insights
         from app.database import db_connection
@@ -419,6 +422,7 @@ async def dashboard(request: Request):
                 WHERE account_id=? ORDER BY created_at DESC LIMIT 10
             """, (account_id,)).fetchall()
     else:
+        comments = {}
         total_pages = 1
         total = 0
         approved = 0
@@ -462,6 +466,7 @@ async def dashboard(request: Request):
         "publish_rate": publish_rate,
         "ttr_7d": ttr_7d,
         "activity": activity,
+        "comments": comments,
     })
 
 
@@ -479,8 +484,8 @@ async def add_business(
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    if role == "staff":
-        raise HTTPException(status_code=403, detail="Staff cannot add businesses")
+    if role in ("staff", "suggest"):
+        raise HTTPException(status_code=403, detail="Only owners/admins can add businesses")
     verify_csrf(request, csrf_token)
     biz_id = create_business(account_id, name, business_type, location, tone)
     add_audit(account_id, user["id"], "business.add", "business", biz_id, name)
@@ -526,6 +531,8 @@ async def sync_reviews(request: Request, business_id: int, background_tasks: Bac
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    if role in ("staff", "suggest"):
+        raise HTTPException(status_code=403, detail="Not allowed for your role")
 
     access_token = user.get("google_access_token", "")
     if not access_token:
@@ -584,6 +591,8 @@ async def publish_response(request: Request, response_id: int, csrf_token: str =
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    if role in ("staff", "suggest"):
+        raise HTTPException(status_code=403, detail="You cannot publish with this role")
     verify_csrf(request, csrf_token)
     if not check_publish(user["id"]):
         return HTMLResponse("Rate limit exceeded for publish", status_code=429)
@@ -603,7 +612,7 @@ async def publish_response(request: Request, response_id: int, csrf_token: str =
 async def connect_google_business(request: Request):
     """After Google OAuth, fetch user's business locations and let them pick one."""
     user, account_id, role = get_account_context(request)
-    if not user or not user.get("google_access_token") or role == "staff":
+    if not user or not user.get("google_access_token") or role in ("staff", "suggest"):
         return RedirectResponse("/auth/google", status_code=302)
 
     from app.google_reviews import get_accounts, get_locations, refresh_access_token
@@ -635,7 +644,7 @@ async def connect_google_business(request: Request):
 async def link_google_location(request: Request, location_name: str = Form(...), location_title: str = Form("")):
     """Link a Google Business location to a ReviewRep business."""
     user, account_id, role = get_account_context(request)
-    if not user or role == "staff":
+    if not user or role in ("staff", "suggest"):
         return RedirectResponse("/login", status_code=302)
     form = await request.form()
     verify_csrf(request, form.get("csrf_token", ""))
@@ -710,6 +719,32 @@ async def generate_ai_response(request: Request, review_id: int, background_task
         return RedirectResponse(f"/dashboard?business_id={review['business_id']}&gen=queued", status_code=302)
 
 
+@app.post("/review/{review_id}/comment")
+async def comment_on_review(request: Request, review_id: int, csrf_token: str = Form(...), text: str = Form(...)):
+    """Add an internal comment on a review (collaboration)."""
+    user, account_id, role = get_account_context(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    verify_csrf(request, csrf_token)
+    text = (text or "").strip()
+    if not text:
+        return RedirectResponse("/dashboard", status_code=302)
+
+    from app.database import db_connection
+    with db_connection() as conn:
+        row = conn.execute("""
+            SELECT r.id, r.business_id FROM reviews r
+            JOIN businesses b ON r.business_id = b.id
+            WHERE r.id = ? AND b.user_id = ?
+        """, (review_id, account_id)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404)
+
+    add_comment(review_id, user["id"], text)
+    add_audit(account_id, user["id"], "comment.add", "review", review_id, "")
+    return RedirectResponse(f"/dashboard?business_id={row['business_id']}", status_code=302)
+
+
 @app.post("/review/{review_id}/generate-all")
 async def generate_all_responses(request: Request, review_id: int, background_tasks: BackgroundTasks, csrf_token: str = Form(...)):
     """Generate AI responses for all reviews without one."""
@@ -755,7 +790,7 @@ async def bulk_approve(request: Request, business_id: int = Form(...), csrf_toke
     if not user:
         return RedirectResponse("/login", status_code=302)
     verify_csrf(request, csrf_token)
-    if role == "staff":
+    if role in ("staff", "suggest"):
         raise HTTPException(status_code=403)
     from app.database import db_connection
     with db_connection() as conn:
@@ -777,7 +812,7 @@ async def bulk_publish(request: Request, business_id: int = Form(...), csrf_toke
     if not user:
         return RedirectResponse("/login", status_code=302)
     verify_csrf(request, csrf_token)
-    if role == "staff":
+    if role in ("staff", "suggest"):
         raise HTTPException(status_code=403)
     from app.database import db_connection
     with db_connection() as conn:
@@ -809,6 +844,8 @@ async def approve(request: Request, response_id: int, background_tasks: Backgrou
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    if role in ("staff", "suggest"):
+        raise HTTPException(status_code=403, detail="You cannot approve with this role")
 
     form = await request.form()
     verify_csrf(request, form.get("csrf_token", ""))
@@ -887,7 +924,7 @@ async def update_business(
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    if role == "staff":
+    if role in ("staff", "suggest"):
         raise HTTPException(status_code=403)
     verify_csrf(request, csrf_token)
     from app.database import db_connection
@@ -910,7 +947,7 @@ async def update_notifications(request: Request):
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    if role == "staff":
+    if role in ("staff", "suggest"):
         raise HTTPException(status_code=403)
     form = await request.form()
     verify_csrf(request, form.get("csrf_token", ""))
@@ -1085,7 +1122,7 @@ async def team_invite(request: Request, email: str = Form(...), role: str = Form
     user, account_id, user_role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    if user_role == "staff":
+    if user_role in ("staff", "suggest"):
         raise HTTPException(status_code=403)
     form = await request.form()
     verify_csrf(request, form.get("csrf_token", ""))
@@ -1102,7 +1139,7 @@ async def team_invite(request: Request, email: str = Form(...), role: str = Form
 @app.post("/team/remove/{member_id}")
 async def team_remove(request: Request, member_id: int):
     user, account_id, role = get_account_context(request)
-    if not user or role == "staff":
+    if not user or role in ("staff", "suggest"):
         return RedirectResponse("/login", status_code=302)
     form = await request.form()
     verify_csrf(request, form.get("csrf_token", ""))
