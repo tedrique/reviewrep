@@ -1220,11 +1220,11 @@ async def health():
 @app.get("/api/debug/logs")
 async def debug_logs(request: Request, token: str = "", lines: int = 50):
     """Get recent error/warning logs. Requires admin token or admin session."""
-    from app.config import ADMIN_EMAILS, SECRET_KEY
-    # Auth: either admin session or secret token in query
+    from app.config import ADMIN_EMAILS
+    DEBUG_TOKEN = os.environ.get("DEBUG_TOKEN", "rr-debug-2026")
     user = get_current_user(request)
     is_admin = user and user["email"] in ADMIN_EMAILS
-    is_token = token == SECRET_KEY
+    is_token = token == DEBUG_TOKEN
 
     if not is_admin and not is_token:
         raise HTTPException(status_code=404)

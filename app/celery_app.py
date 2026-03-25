@@ -13,6 +13,12 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_time_limit=30,
     task_soft_time_limit=25,
+    beat_schedule={
+        "sla-scan-15m": {
+            "task": "app.sla.sla_scan_task",
+            "schedule": 900.0,
+        },
+    },
 )
 
 

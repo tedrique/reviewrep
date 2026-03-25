@@ -275,6 +275,11 @@
                             {{ review.response_status or 'pending' }}
                         </span>
                     </div>
+                    {% if review.missing_fact %}
+                    <div class="mb-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded">
+                        Key brand fact may be missing — please review.
+                    </div>
+                    {% endif %}
 
                     {% if review.response_status == 'approved' %}
                     <p class="text-sm text-gray-700">{{ review.edited_response or review.ai_response }}</p>

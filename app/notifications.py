@@ -16,6 +16,8 @@ def _build_text(event: str, payload: Dict) -> str:
         return f"AI draft ready for {biz}: {rating}★ from {author}. Approve at {APP_URL}/dashboard"
     if event == "approved":
         return f"Response approved for {biz}. See history at {APP_URL}/dashboard"
+    if event == "sla_alert":
+        return f"SLA alert: {rating}★ review waiting >24h for {biz}. Go approve now."
     return f"Update for {biz} — {event}"
 
 
