@@ -249,6 +249,150 @@ async def add_review_manual(
     return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
 
 
+# --- Google Business Sync ---
+
+@app.post("/business/{business_id}/sync")
+async def sync_reviews(request: Request, business_id: int):
+    """Pull latest reviews from Google Business Profile."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+
+    access_token = user.get("google_access_token", "")
+    if not access_token:
+        return RedirectResponse(f"/dashboard?business_id={business_id}&error=no_google", status_code=302)
+
+    from app.database import db_connection
+    with db_connection() as conn:
+        biz = conn.execute("SELECT * FROM businesses WHERE id=? AND user_id=?", (business_id, user["id"])).fetchone()
+        if not biz or not biz["google_location_id"]:
+            return RedirectResponse(f"/dashboard?business_id={business_id}&error=no_location", status_code=302)
+
+    # Refresh token if needed
+    from app.google_reviews import get_reviews as fetch_google_reviews, refresh_access_token
+    from app.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+
+    if user.get("google_refresh_token"):
+        new_token = refresh_access_token(user["google_refresh_token"], GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET)
+        if new_token:
+            access_token = new_token
+            with db_connection() as conn:
+                conn.execute("UPDATE users SET google_access_token=? WHERE id=?", (new_token, user["id"]))
+
+    reviews = fetch_google_reviews(access_token, biz["google_location_id"])
+
+    # Import new reviews
+    imported = 0
+    for rev in reviews:
+        if rev["has_reply"]:
+            continue
+        with db_connection() as conn:
+            exists = conn.execute("SELECT id FROM reviews WHERE google_review_id=? AND business_id=?",
+                                  (rev["google_review_id"], business_id)).fetchone()
+            if not exists and rev["text"]:
+                add_review(business_id, rev["author"], rev["rating"], rev["text"],
+                           google_review_id=rev["google_review_id"], review_time=rev["time"])
+                imported += 1
+
+    return RedirectResponse(f"/dashboard?business_id={business_id}&synced={imported}", status_code=302)
+
+
+@app.post("/response/{response_id}/publish")
+async def publish_response(request: Request, response_id: int):
+    """Publish an approved response to Google."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+
+    from app.database import db_connection
+    with db_connection() as conn:
+        row = conn.execute("""
+            SELECT resp.*, r.google_review_id, r.business_id, b.google_location_id
+            FROM responses resp
+            JOIN reviews r ON resp.review_id = r.id
+            JOIN businesses b ON r.business_id = b.id
+            WHERE resp.id = ?
+        """, (response_id,)).fetchone()
+
+    if not row or not row["google_review_id"] or not row["google_location_id"]:
+        return RedirectResponse("/dashboard", status_code=302)
+
+    reply_text = row["edited_response"] or row["ai_response"]
+    review_name = f"{row['google_location_id']}/reviews/{row['google_review_id']}"
+
+    from app.google_reviews import post_reply, refresh_access_token
+    from app.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+
+    access_token = user.get("google_access_token", "")
+    if user.get("google_refresh_token"):
+        new_token = refresh_access_token(user["google_refresh_token"], GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET)
+        if new_token:
+            access_token = new_token
+
+    success = post_reply(access_token, review_name, reply_text)
+    if success:
+        with db_connection() as conn:
+            conn.execute("UPDATE responses SET status='published' WHERE id=?", (response_id,))
+
+    return RedirectResponse(f"/dashboard?business_id={row['business_id']}", status_code=302)
+
+
+@app.get("/business/connect-google")
+async def connect_google_business(request: Request):
+    """After Google OAuth, fetch user's business locations and let them pick one."""
+    user = get_current_user(request)
+    if not user or not user.get("google_access_token"):
+        return RedirectResponse("/auth/google", status_code=302)
+
+    from app.google_reviews import get_accounts, get_locations, refresh_access_token
+    from app.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+
+    access_token = user["google_access_token"]
+    if user.get("google_refresh_token"):
+        new_token = refresh_access_token(user["google_refresh_token"], GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET)
+        if new_token:
+            access_token = new_token
+
+    accounts = get_accounts(access_token)
+    all_locations = []
+    for acc in accounts:
+        locs = get_locations(access_token, acc["name"])
+        for loc in locs:
+            all_locations.append({
+                "name": loc.get("name", ""),
+                "title": loc.get("title", loc.get("locationName", "Unknown")),
+                "address": loc.get("storefrontAddress", {}).get("addressLines", [""])[0] if loc.get("storefrontAddress") else "",
+            })
+
+    return templates.TemplateResponse(request=request, name="connect_google.html", context={
+        "user": user, "locations": all_locations,
+    })
+
+
+@app.post("/business/link-location")
+async def link_google_location(request: Request, location_name: str = Form(...), location_title: str = Form("")):
+    """Link a Google Business location to a ReviewRep business."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+
+    from app.database import db_connection
+    businesses = get_businesses(user["id"])
+
+    if businesses:
+        with db_connection() as conn:
+            conn.execute("UPDATE businesses SET google_location_id=? WHERE id=?",
+                         (location_name, businesses[0]["id"]))
+    else:
+        create_business(user["id"], location_title or "My Business", "other", "", "friendly and professional")
+        businesses = get_businesses(user["id"])
+        with db_connection() as conn:
+            conn.execute("UPDATE businesses SET google_location_id=? WHERE id=?",
+                         (location_name, businesses[0]["id"]))
+
+    return RedirectResponse("/dashboard", status_code=302)
+
+
 @app.post("/review/{review_id}/generate")
 async def generate_ai_response(request: Request, review_id: int):
     user = get_current_user(request)
