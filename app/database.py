@@ -182,7 +182,7 @@ def create_business(
     with db_connection() as conn:
         cursor = conn.execute(
             """INSERT INTO businesses (user_id, name, type, location, tone, auto_approve_high, banned_phrases, signoff_library, brand_facts)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (user_id, name, business_type, location, tone, auto_approve_high, banned_phrases, signoff_library, brand_facts)
         )
         return cursor.lastrowid
