@@ -86,8 +86,10 @@ def init_db():
 def create_user(email: str, name: str, google_id: str, access_token: str = "", refresh_token: str = "") -> int:
     trial_end = datetime.utcnow().isoformat()
     with db_connection() as conn:
-        # Upsert
-        existing = conn.execute("SELECT id FROM users WHERE google_id = ?", (google_id,)).fetchone()
+        # Check by email first (covers demo re-login)
+        existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if not existing:
+            existing = conn.execute("SELECT id FROM users WHERE google_id = ?", (google_id,)).fetchone()
         if existing:
             conn.execute(
                 "UPDATE users SET google_access_token = ?, google_refresh_token = ?, updated_at = datetime('now') WHERE id = ?",

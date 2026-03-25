@@ -164,11 +164,20 @@ async def billing_webhook(request: Request):
 
 @app.post("/demo-login")
 async def demo_login(request: Request, email: str = Form(...), name: str = Form(...)):
-    from app.database import create_user
+    from app.database import create_user, db_connection
+
+    # Check if user already exists
+    with db_connection() as conn:
+        existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+
     user_id = create_user(email=email, name=name, google_id=f"demo_{email}")
     request.session["user_id"] = user_id
 
-    # Send welcome email (non-blocking, won't break if SMTP not configured)
+    if existing:
+        # Returning user — go straight to dashboard
+        return RedirectResponse("/dashboard", status_code=302)
+
+    # New user — send welcome email and start onboarding
     try:
         from app.email_service import send_welcome_email
         send_welcome_email(to=email, name=name)
@@ -469,7 +478,15 @@ async def onboarding_step3(request: Request, author: str = Form("Customer"), rat
         api_key=ANTHROPIC_API_KEY, owner_name=business.get("owner_name", ""),
     )
     save_response(review_id, ai_resp)
-    return RedirectResponse(f"/dashboard?business_id={business['id']}", status_code=302)
+    return RedirectResponse("/welcome", status_code=302)
+
+
+@app.get("/welcome", response_class=HTMLResponse)
+async def welcome_page(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    return templates.TemplateResponse(request=request, name="welcome.html", context={"user": user})
 
 
 # --- Help & Support ---
