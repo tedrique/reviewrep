@@ -27,6 +27,17 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
 templates_dir = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
+
+
+def ensure_csrf_token(request):
+    """Get or create a CSRF token stored in the session."""
+    token = request.session.get("csrf_token")
+    if not token:
+        token = secrets.token_hex(32)
+        request.session["csrf_token"] = token
+    return token
+
+
 templates.env.globals["csrf_token"] = ensure_csrf_token
 
 static_dir = Path(__file__).parent / "static"
