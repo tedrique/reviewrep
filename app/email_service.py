@@ -1,41 +1,55 @@
-"""Email service — sends transactional emails via SMTP.
-For production: plug in SendGrid, Mailgun, or AWS SES.
-For MVP: uses SMTP (Gmail app password or any SMTP provider).
+"""Email service — sends transactional emails directly from our domain.
+Direct SMTP delivery to recipient's mail server. No third-party services.
+Some emails may land in spam — that's expected for MVP.
 """
 import smtplib
+import socket
+import dns.resolver
 import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from app.config import APP_URL
 
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "hello@reviewreply.ai")
-FROM_NAME = os.getenv("FROM_NAME", "ReviewReply AI")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "hello@reviewrep.me")
+FROM_NAME = os.getenv("FROM_NAME", "ReviewRep")
+
+
+def _get_mx_host(domain: str) -> str:
+    """Get the MX server for a domain."""
+    try:
+        records = dns.resolver.resolve(domain, "MX")
+        mx = sorted(records, key=lambda r: r.preference)
+        return str(mx[0].exchange).rstrip(".")
+    except Exception:
+        return f"mail.{domain}"
 
 
 def send_email(to: str, subject: str, html_body: str) -> bool:
-    """Send an email via SMTP. Returns True on success."""
-    if not SMTP_USER or not SMTP_PASS:
-        print(f"[EMAIL SKIPPED — no SMTP config] To: {to} Subject: {subject}")
-        return False
-
+    """Send email directly to recipient's mail server."""
     msg = MIMEMultipart("alternative")
     msg["From"] = f"{FROM_NAME} <{FROM_EMAIL}>"
     msg["To"] = to
     msg["Subject"] = subject
+    msg["Reply-To"] = "stan.evodek@gmail.com"
     msg.attach(MIMEText(html_body, "html"))
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
+        recipient_domain = to.split("@")[1]
+        mx_host = _get_mx_host(recipient_domain)
+
+        with smtplib.SMTP(mx_host, 25, timeout=10) as server:
+            server.ehlo("reviewrep.me")
+            try:
+                server.starttls()
+                server.ehlo("reviewrep.me")
+            except Exception:
+                pass
             server.sendmail(FROM_EMAIL, to, msg.as_string())
+
+        print(f"[EMAIL SENT] To: {to} Subject: {subject}")
         return True
     except Exception as e:
-        print(f"[EMAIL ERROR] {e}")
+        print(f"[EMAIL ERROR] To: {to} Error: {e}")
         return False
 
 
@@ -45,13 +59,13 @@ def _base_template(content: str) -> str:
     return f"""
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 40px 20px;">
         <div style="margin-bottom: 32px;">
-            <span style="font-size: 18px; font-weight: 700; color: #111;">ReviewReply </span>
-            <span style="font-size: 18px; font-weight: 700; color: #2563eb;">AI</span>
+            <span style="font-size: 18px; font-weight: 700; color: #111;">Review</span><span style="font-size: 18px; font-weight: 700; color: #2563eb;">Rep</span>
         </div>
         {content}
         <div style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #e5e7eb; font-size: 12px; color: #9ca3af;">
-            <p>ReviewReply AI · Canterbury, UK</p>
-            <p>You received this email because you signed up at reviewreply.ai</p>
+            <p style="background: #fef3c7; padding: 8px 12px; border-radius: 6px; color: #92400e; margin-bottom: 12px;">Can't find this email? Please check your spam or junk folder.</p>
+            <p>ReviewRep · Canterbury, UK</p>
+            <p>You received this email because you signed up at reviewrep.me</p>
         </div>
     </div>
     """

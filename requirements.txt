@@ -8,3 +8,4 @@ anthropic>=0.76.0
 python-dotenv>=1.0.1
 requests>=2.31.0
 stripe>=8.0.0
+dnspython>=2.6.0
