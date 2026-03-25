@@ -487,8 +487,17 @@ async def approve(request: Request, response_id: int):
     edited = form.get("edited_response", "")
     approve_response(response_id, edited)
 
-    # Get business_id for redirect
+    # Check if this is the first ever approve (onboarding) → show welcome
     from app.database import db_connection
+    with db_connection() as conn:
+        total_approved = conn.execute(
+            "SELECT COUNT(*) as c FROM responses resp JOIN reviews r ON resp.review_id = r.id JOIN businesses b ON r.business_id = b.id WHERE b.user_id = ? AND resp.status = 'approved'",
+            (user["id"],)
+        ).fetchone()["c"]
+        if total_approved == 1:
+            return RedirectResponse("/welcome", status_code=302)
+
+    # Get business_id for redirect
     with db_connection() as conn:
         row = conn.execute("""
             SELECT r.business_id FROM responses resp
@@ -627,7 +636,7 @@ async def onboarding_step3(request: Request, author: str = Form("Customer"), rat
         api_key=ANTHROPIC_API_KEY, owner_name=business.get("owner_name", ""),
     )
     save_response(review_id, ai_resp)
-    return RedirectResponse("/welcome", status_code=302)
+    return RedirectResponse(f"/dashboard?business_id={business['id']}", status_code=302)
 
 
 @app.get("/welcome", response_class=HTMLResponse)
