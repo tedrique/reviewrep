@@ -1,17 +1,45 @@
-"""Email service — sends transactional emails directly from our domain.
-Direct SMTP delivery to recipient's mail server. No third-party services.
-Some emails may land in spam — that's expected for MVP.
-"""
+"""Email service — supports Postmark (preferred) and direct SMTP fallback."""
 import smtplib
 import socket
 import dns.resolver
 import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import requests
 from app.config import APP_URL
 
 FROM_EMAIL = os.getenv("FROM_EMAIL", "hello@reviewrep.me")
 FROM_NAME = os.getenv("FROM_NAME", "ReviewRep")
+POSTMARK_TOKEN = os.getenv("POSTMARK_TOKEN", "")
+SES_ACCESS_KEY = os.getenv("SES_ACCESS_KEY", "")
+SES_SECRET_KEY = os.getenv("SES_SECRET_KEY", "")
+SES_REGION = os.getenv("SES_REGION", "us-east-1")
+
+
+def _try_ses(to: str, subject: str, html_body: str) -> bool:
+    if not (SES_ACCESS_KEY and SES_SECRET_KEY):
+        return False
+    try:
+        import boto3
+        client = boto3.client(
+            "ses",
+            region_name=SES_REGION,
+            aws_access_key_id=SES_ACCESS_KEY,
+            aws_secret_access_key=SES_SECRET_KEY,
+        )
+        client.send_email(
+            Source=f"{FROM_NAME} <{FROM_EMAIL}>",
+            Destination={"ToAddresses": [to]},
+            Message={
+                "Subject": {"Data": subject, "Charset": "UTF-8"},
+                "Body": {"Html": {"Data": html_body, "Charset": "UTF-8"}},
+            },
+        )
+        print(f"[EMAIL SES SENT] To: {to} Subject: {subject}")
+        return True
+    except Exception as e:
+        print(f"[EMAIL SES ERROR] {e}")
+        return False
 
 
 def _get_mx_host(domain: str) -> str:
@@ -25,6 +53,34 @@ def _get_mx_host(domain: str) -> str:
 
 
 def send_email(to: str, subject: str, html_body: str) -> bool:
+    if POSTMARK_TOKEN:
+        try:
+            resp = requests.post(
+                "https://api.postmarkapp.com/email",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "X-Postmark-Server-Token": POSTMARK_TOKEN,
+                },
+                json={
+                    "From": f"{FROM_NAME} <{FROM_EMAIL}>",
+                    "To": to,
+                    "Subject": subject,
+                    "HtmlBody": html_body,
+                    "MessageStream": "outbound",
+                },
+                timeout=8,
+            )
+            resp.raise_for_status()
+            print(f"[EMAIL SENT PM] To: {to} Subject: {subject}")
+            return True
+        except Exception as e:
+            print(f"[EMAIL PM ERROR] To: {to} Error: {e}")
+            # fall through to SMTP
+
+    if _try_ses(to, subject, html_body):
+        return True
+
     """Send email directly to recipient's mail server."""
     msg = MIMEMultipart("alternative")
     msg["From"] = f"{FROM_NAME} <{FROM_EMAIL}>"

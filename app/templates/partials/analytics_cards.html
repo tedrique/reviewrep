@@ -1,0 +1,41 @@
+<div class="grid md:grid-cols-3 gap-3 md:gap-4 mb-6">
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+        <div class="text-sm text-gray-500">Pending approval</div>
+        <div class="text-2xl font-bold text-gray-900">{{ stats.pending }}</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+        <div class="text-sm text-gray-500">Need AI draft</div>
+        <div class="text-2xl font-bold text-gray-900">{{ stats.missing }}</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+        <div class="text-sm text-gray-500">1–2★ to rescue</div>
+        <div class="text-2xl font-bold text-rose-600">{{ stats.negative }}</div>
+    </div>
+</div>
+
+<div class="grid md:grid-cols-3 gap-3 md:gap-4 mb-6">
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+        <div class="text-sm text-gray-500">Approved replies</div>
+        <div class="text-2xl font-bold text-gray-900">{{ approved_reviews }}/{{ total_reviews }}</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+        <div class="text-sm text-gray-500">Published to Google</div>
+        <div class="text-2xl font-bold text-emerald-700">{{ published_reviews }}</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+        <div class="text-sm text-gray-500">Avg time to publish</div>
+        <div class="text-2xl font-bold text-gray-900">{% if avg_ttr %}{{ (avg_ttr/3600)|round(1) }}h{% else %}—{% endif %}</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+        <div class="text-sm text-gray-500">Publish last 7d</div>
+        <div class="text-2xl font-bold text-indigo-700">{{ publish_rate }}</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+        <div class="text-sm text-gray-500">Avg TTR last 7d</div>
+        <div class="text-2xl font-bold text-gray-900">{% if ttr_7d %}{{ (ttr_7d/3600)|round(1) }}h{% else %}—{% endif %}</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+        <div class="text-sm text-gray-500">Rating delta (30d vs prev)</div>
+        <div class="text-2xl font-bold {% if rating_delta and rating_delta < 0 %}text-rose-700{% else %}text-emerald-700{% endif %}">{% if rating_delta is not none %}{{ rating_delta }}{% else %}—{% endif %}</div>
+    </div>
+</div>

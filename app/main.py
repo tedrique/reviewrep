@@ -7,23 +7,35 @@ from starlette.middleware.sessions import SessionMiddleware
 from pathlib import Path
 import secrets
 import time
+import sentry_sdk
 
-from app.config import SECRET_KEY, ANTHROPIC_API_KEY, DEBUG
+from app.config import SECRET_KEY, ANTHROPIC_API_KEY, DEBUG, ADMIN_BACKDOOR_TOKEN, SENTRY_DSN, REDIS_URL
 from app.database import (
     init_db, get_user, get_businesses, get_reviews, count_reviews,
     create_business, add_review, save_response, approve_response,
     get_notification_prefs, save_notification_pref,
     get_team_members, create_team_invite, attach_member_user, remove_team_member,
-    add_audit,
+    add_audit, count_responses_this_month, get_dead_letters,
 )
 from app.ai_responder import generate_response
 from app.notifications import send_notifications
 from app.task_queue import enqueue as task_enqueue
-from app.rate_limit import check_generate, check_publish
+from app.rate_limit import check_generate, check_publish, check_ip
 from app.database import get_dead_letters
+from app.celery_app import REDIS_URL, RESULT_URL, celery_app
+from app.celery_tasks import send_notification, generate_one
+from app.bulk_tasks import generate_bulk_task
+from app.logger import setup_logging, logger
+from app.task_status import get_task_status
+from starlette.responses import JSONResponse
 
 app = FastAPI(title="ReviewReply AI", docs_url="/docs" if DEBUG else None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+
+if SENTRY_DSN:
+    sentry_sdk.init(dsn=SENTRY_DSN, traces_sample_rate=0.05)
+
+setup_logging()
 
 templates_dir = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
@@ -45,20 +57,10 @@ if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 # Simple in-memory rate limiting per IP (best-effort)
-_rate_bucket = {}
-RATE_LIMIT = 120  # requests
-RATE_WINDOW = 60  # seconds
-
-
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     ip = request.client.host if request.client else "unknown"
-    now = time.time()
-    bucket = _rate_bucket.get(ip, [])
-    bucket = [t for t in bucket if now - t < RATE_WINDOW]
-    bucket.append(now)
-    _rate_bucket[ip] = bucket
-    if len(bucket) > RATE_LIMIT:
+    if not check_ip(ip):
         return HTMLResponse("Rate limit exceeded", status_code=429)
     try:
         response = await call_next(request)
@@ -203,6 +205,13 @@ async def billing_success(request: Request, session_id: str = ""):
     return RedirectResponse("/dashboard", status_code=302)
 
 
+@app.get("/tasks/{task_id}")
+async def task_status(task_id: str):
+    if not REDIS_URL:
+        raise HTTPException(status_code=503, detail="Task tracking unavailable without Redis backend")
+    return JSONResponse(get_task_status(task_id))
+
+
 @app.get("/billing/portal")
 async def billing_portal(request: Request):
     user, account_id, role = get_account_context(request)
@@ -240,46 +249,65 @@ async def billing_webhook(request: Request):
     return {"status": "ok"}
 
 
-# --- Admin backdoor login (hidden, not linked anywhere) ---
+# --- Admin OTP login ---
 
-@app.get("/admin-login", response_class=HTMLResponse)
-async def admin_login_page(request: Request):
-    from app.config import ADMIN_BACKDOOR_TOKEN
-    token = request.query_params.get("token", "")
-    if ADMIN_BACKDOOR_TOKEN and token != ADMIN_BACKDOOR_TOKEN:
-        raise HTTPException(status_code=404)
-    return templates.TemplateResponse(request=request, name="admin_login.html")
+import random
 
 
-@app.post("/admin-login")
-async def demo_login(request: Request, email: str = Form(...), name: str = Form(...), token: str = Form(""), csrf_token: str = Form(...)):
-    from app.config import ADMIN_BACKDOOR_TOKEN
-    if ADMIN_BACKDOOR_TOKEN and token != ADMIN_BACKDOOR_TOKEN:
-        raise HTTPException(status_code=404)
+@app.get("/admin-otp", response_class=HTMLResponse)
+async def admin_otp_page(request: Request):
+    return templates.TemplateResponse(request=request, name="admin_otp.html", context={"step": "request"})
+
+
+@app.post("/admin-otp/request")
+async def admin_otp_request(request: Request, email: str = Form(...), csrf_token: str = Form(...)):
     verify_csrf(request, csrf_token)
-    from app.database import create_user, db_connection
+    email = email.strip().lower()
+    if email not in [e.lower() for e in ADMIN_EMAILS]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    code = f"{random.randint(0, 999999):06d}"
+    if REDIS_URL:
+        from app.rate_limit import _redis_client
+        if _redis_client:
+            _redis_client.setex(f"otp:{email}", 600, code)
+    else:
+        request.session[f"otp_{email}"] = code
+    try:
+        from app.email_service import send_email
+        send_email(email, "Your admin code", f"<p>Your admin login code: <b>{code}</b></p><p>Expires in 10 minutes.</p>")
+    except Exception:
+        pass
+    return templates.TemplateResponse(request=request, name="admin_otp.html", context={"step": "verify", "email": email})
 
-    # Check if user already exists
-    with db_connection() as conn:
-        existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
 
-    user_id = create_user(email=email, name=name, google_id=f"demo_{email}")
+@app.post("/admin-otp/verify")
+async def admin_otp_verify(request: Request, email: str = Form(...), code: str = Form(...), csrf_token: str = Form(...)):
+    verify_csrf(request, csrf_token)
+    email = email.strip().lower()
+    stored = None
+    if REDIS_URL:
+        from app.rate_limit import _redis_client
+        if _redis_client:
+            stored = _redis_client.get(f"otp:{email}")
+            stored = stored.decode() if stored else None
+    else:
+        stored = request.session.get(f"otp_{email}")
+    if not stored or stored != code:
+        raise HTTPException(status_code=403, detail="Invalid code")
+    # consume
+    if REDIS_URL:
+        from app.rate_limit import _redis_client
+        if _redis_client:
+            _redis_client.delete(f"otp:{email}")
+    else:
+        request.session.pop(f"otp_{email}", None)
+
+    from app.database import create_user
+    user_id = create_user(email=email, name=email.split("@")[0], google_id=f"admin_{email}")
     request.session["user_id"] = user_id
     request.session["account_id"] = user_id
     request.session["role"] = "owner"
-
-    if existing:
-        # Returning user — go straight to dashboard
-        return RedirectResponse("/dashboard", status_code=302)
-
-    # New user — send welcome email and start onboarding
-    try:
-        from app.email_service import send_welcome_email
-        send_welcome_email(to=email, name=name)
-    except Exception:
-        pass
-
-    return RedirectResponse("/onboarding", status_code=302)
+    return RedirectResponse("/admin", status_code=302)
 
 
 # --- Dashboard ---
@@ -295,9 +323,22 @@ async def dashboard(request: Request):
     reviews = []
     page = int(request.query_params.get("page", 1))
     per_page = 20
-    status_filter = request.query_params.get("status")
+    status_filter = request.query_params.get("status") or "needs_action"
     rating_filter = request.query_params.get("rating")
     search = request.query_params.get("q", "").strip() or None
+    responses_used = count_responses_this_month(account_id)
+    plan = user.get("subscription_plan") or "starter"
+    status = user.get("subscription_status") or "trial"
+    plan_limit = 50 if plan == "starter" else None
+    responses_left = None if plan_limit is None else max(plan_limit - responses_used, 0)
+    trial_days_left = None
+    if status == "trial" and user.get("trial_ends_at"):
+        from datetime import datetime as dt
+        try:
+            trial_end = dt.fromisoformat(user["trial_ends_at"])
+            trial_days_left = max((trial_end - dt.utcnow()).days, 0)
+        except Exception:
+            pass
 
     business_id = request.query_params.get("business_id")
     if businesses:
@@ -339,12 +380,58 @@ async def dashboard(request: Request):
                 WHERE b.id = ? AND resp.published_at != ''
             """, (current_business["id"],)).fetchone()
             avg_ttr = avg_ttr_row["s"] if avg_ttr_row and avg_ttr_row["s"] else None
+            approve_ready = conn.execute("""
+                SELECT COUNT(*) as c FROM responses resp
+                JOIN reviews r ON resp.review_id = r.id
+                WHERE r.business_id=? AND (resp.status IS NULL OR resp.status != 'approved') AND r.rating >= 4 AND resp.ai_response IS NOT NULL
+            """, (current_business["id"],)).fetchone()["c"]
+            publish_ready = conn.execute("""
+                SELECT COUNT(*) as c FROM responses resp
+                JOIN reviews r ON resp.review_id = r.id
+                JOIN businesses b ON r.business_id = b.id
+                WHERE r.business_id=? AND resp.status='approved' AND r.google_review_id != '' AND b.google_location_id != ''
+            """, (current_business["id"],)).fetchone()["c"]
+            # simple 7-day counts
+            weekly = conn.execute("""
+                SELECT strftime('%Y-%m-%d', r.created_at) as d, COUNT(*) as c
+                FROM reviews r WHERE r.business_id=? AND r.created_at >= date('now','-7 day')
+                GROUP BY d ORDER BY d ASC
+            """, (current_business["id"],)).fetchall()
+            weekly_labels = [w["d"][5:] for w in weekly]
+            weekly_data = [w["c"] for w in weekly]
+            rating_recent = conn.execute("""
+                SELECT AVG(rating) as a FROM reviews WHERE business_id=? AND created_at >= date('now','-30 day')
+            """, (current_business["id"],)).fetchone()["a"]
+            rating_prev = conn.execute("""
+                SELECT AVG(rating) as a FROM reviews WHERE business_id=? AND created_at BETWEEN date('now','-60 day') AND date('now','-30 day')
+            """, (current_business["id"],)).fetchone()["a"]
+            rating_delta = round(rating_recent - rating_prev, 2) if rating_recent and rating_prev else None
+            publish_rate = conn.execute("""
+                SELECT COUNT(*) as c FROM responses WHERE status='published' AND created_at >= date('now','-7 day')
+            """, ()).fetchone()["c"]
+            ttr_7d = conn.execute("""
+                SELECT AVG(strftime('%s', resp.published_at) - strftime('%s', r.created_at)) as s
+                FROM responses resp JOIN reviews r ON resp.review_id=r.id
+                WHERE resp.published_at != '' AND resp.created_at >= date('now','-7 day')
+            """, ()).fetchone()["s"]
+            activity = conn.execute("""
+                SELECT action, meta, created_at FROM audit_log
+                WHERE account_id=? ORDER BY created_at DESC LIMIT 10
+            """, (account_id,)).fetchall()
     else:
         total_pages = 1
         total = 0
         approved = 0
         published = 0
         avg_ttr = None
+        approve_ready = 0
+        publish_ready = 0
+        weekly_labels = []
+        weekly_data = []
+        rating_delta = None
+        publish_rate = 0
+        ttr_7d = None
+        activity = []
 
     return templates.TemplateResponse(request=request, name="dashboard.html", context={
         "user": user,
@@ -361,6 +448,20 @@ async def dashboard(request: Request):
         "status_filter": status_filter or "all",
         "rating_filter": rating_filter or "all",
         "search": search or "",
+        "responses_used": responses_used,
+        "responses_left": responses_left,
+        "plan_limit": plan_limit,
+        "trial_days_left": trial_days_left,
+        "plan": plan,
+        "status": status,
+        "approve_ready": approve_ready,
+        "publish_ready": publish_ready,
+        "weekly_labels": weekly_labels,
+        "weekly_data": weekly_data,
+        "rating_delta": rating_delta,
+        "publish_rate": publish_rate,
+        "ttr_7d": ttr_7d,
+        "activity": activity,
     })
 
 
@@ -409,12 +510,11 @@ async def add_review_manual(
     verify_csrf(request, csrf_token)
     new_id = add_review(business_id, author, rating, text)
     add_audit(account_id, user["id"], "review.add", "review", new_id, f"rating={rating}")
-    task_enqueue(send_notifications, account_id, "new_review", {
-        "business_name": biz["name"],
-        "author": author,
-        "rating": rating,
-        "text": text,
-    })
+    payload = {"business_name": biz["name"], "author": author, "rating": rating, "text": text}
+    if REDIS_URL:
+        send_notification.delay(account_id, "new_review", payload)
+    else:
+        task_enqueue(send_notifications, account_id, "new_review", payload)
     return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
 
 
@@ -464,12 +564,16 @@ async def sync_reviews(request: Request, business_id: int, background_tasks: Bac
                        google_review_id=rev["google_review_id"], review_time=rev["time"])
             imported += 1
             add_audit(account_id, user["id"], "review.sync", "review", None, f"rating={rev['rating']}")
-            task_enqueue(send_notifications, account_id, "new_review", {
+            payload = {
                 "business_name": biz["name"],
                 "author": rev["author"],
                 "rating": rev["rating"],
                 "text": rev["text"],
-            })
+            }
+            if REDIS_URL:
+                send_notification.delay(account_id, "new_review", payload)
+            else:
+                task_enqueue(send_notifications, account_id, "new_review", payload)
 
     return RedirectResponse(f"/dashboard?business_id={business_id}&synced={imported}", status_code=302)
 
@@ -484,38 +588,15 @@ async def publish_response(request: Request, response_id: int, csrf_token: str =
     if not check_publish(user["id"]):
         return HTMLResponse("Rate limit exceeded for publish", status_code=429)
 
-    from app.database import db_connection
-    with db_connection() as conn:
-        row = conn.execute("""
-            SELECT resp.*, r.google_review_id, r.business_id, b.google_location_id
-            FROM responses resp
-            JOIN reviews r ON resp.review_id = r.id
-            JOIN businesses b ON r.business_id = b.id
-            WHERE resp.id = ? AND b.user_id = ?
-        """, (response_id, account_id)).fetchone()
-
-    if not row or not row["google_review_id"] or not row["google_location_id"]:
-        return RedirectResponse("/dashboard", status_code=302)
-
-    reply_text = row["edited_response"] or row["ai_response"]
-    review_name = f"{row['google_location_id']}/reviews/{row['google_review_id']}"
-
-    from app.google_reviews import post_reply, refresh_access_token
-    from app.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
-
-    access_token = user.get("google_access_token", "")
-    if user.get("google_refresh_token"):
-        new_token = refresh_access_token(user["google_refresh_token"], GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET)
-        if new_token:
-            access_token = new_token
-
-    success = post_reply(access_token, review_name, reply_text)
-    if success:
-        with db_connection() as conn:
-            conn.execute("UPDATE responses SET status='published' WHERE id=?", (response_id,))
-        add_audit(account_id, user["id"], "response.publish", "response", response_id, "")
-
-    return RedirectResponse(f"/dashboard?business_id={row['business_id']}", status_code=302)
+    # Offload publish to Celery
+    if REDIS_URL:
+        from app.publish_celery import publish_response_task
+        task = publish_response_task.delay(account_id, user["id"], response_id, user.get("google_refresh_token", ""), user.get("google_access_token", ""))
+        return RedirectResponse(f"/dashboard?task={task.id}", status_code=302)
+    else:
+        from app.publish_task import publish_response_task_sync
+        task_enqueue(lambda: publish_response_task_sync(account_id, user["id"], response_id, user.get("google_refresh_token", ""), user.get("google_access_token", "")))
+        return RedirectResponse("/dashboard?pub=queued", status_code=302)
 
 
 @app.get("/business/connect-google")
@@ -584,6 +665,13 @@ async def generate_ai_response(request: Request, review_id: int, background_task
     verify_csrf(request, csrf_token)
     if not check_generate(user["id"]):
         return HTMLResponse("Rate limit exceeded for generate", status_code=429)
+    # Plan enforcement
+    plan = user.get("subscription_plan") or "starter"
+    status = user.get("subscription_status") or "trial"
+    if plan == "starter":
+        used = count_responses_this_month(account_id)
+        if used >= 50:
+            return RedirectResponse("/pricing?limit_reached=1", status_code=302)
 
     # Check subscription / trial
     from datetime import datetime as dt
@@ -611,38 +699,13 @@ async def generate_ai_response(request: Request, review_id: int, background_task
     if not review:
         raise HTTPException(status_code=404)
 
-    ai_response = generate_response(
-        review_text=review["text"],
-        rating=review["rating"],
-        author=review["author"],
-        business_name=review["business_name"],
-        business_type=review["business_type"],
-        location=review["location"],
-        tone=review["tone"],
-        api_key=ANTHROPIC_API_KEY,
-        owner_name=review["owner_name"] or "",
-        banned_phrases=review["banned_phrases"] or "",
-        signoff_library=review["signoff_library"] or "",
-        brand_facts=review["brand_facts"] or "",
-    )
-
-    response_id = save_response(review_id, ai_response)
-    add_audit(account_id, user["id"], "response.generate", "review", review_id, f"rating={review['rating']}")
-    if review["auto_approve_high"] and review["rating"] >= 4:
-        approve_response(response_id, ai_response)
-        task_enqueue(send_notifications, account_id, "approved", {
-            "business_name": review["business_name"],
-            "rating": review["rating"],
-            "author": review["author"],
-        })
-        add_audit(account_id, user["id"], "response.auto_approve", "response", response_id, "")
+    # Offload generation to Celery/worker
+    if REDIS_URL:
+        task = generate_one.delay(account_id, review_id)
+        return RedirectResponse(f"/dashboard?business_id={review['business_id']}&task={task.id}", status_code=302)
     else:
-        task_enqueue(send_notifications, account_id, "draft_ready", {
-            "business_name": review["business_name"],
-            "rating": review["rating"],
-            "author": review["author"],
-        })
-    return RedirectResponse(f"/dashboard?business_id={review['business_id']}", status_code=302)
+        t = task_enqueue(lambda: generate_one(account_id, review_id))
+        return RedirectResponse(f"/dashboard?business_id={review['business_id']}&gen=queued", status_code=302)
 
 
 @app.post("/review/{review_id}/generate-all")
@@ -672,35 +735,71 @@ async def generate_all_responses(request: Request, review_id: int, background_ta
             WHERE r.business_id = ? AND b.user_id = ? AND resp.id IS NULL
         """, (business_id, account_id)).fetchall()
 
-    for rev in reviews_without:
-        try:
-            ai_response = generate_response(
-                review_text=rev["text"],
-                rating=rev["rating"],
-                author=rev["author"],
-                business_name=rev["business_name"],
-                business_type=rev["business_type"],
-                location=rev["location"],
-                tone=rev["tone"],
-                api_key=ANTHROPIC_API_KEY,
-                owner_name=rev["owner_name"] or "",
-                banned_phrases=rev["banned_phrases"] or "",
-                signoff_library=rev["signoff_library"] or "",
-                brand_facts=rev["brand_facts"] or "",
-            )
-            resp_id = save_response(rev["id"], ai_response)
-            if rev["auto_approve_high"] and rev["rating"] >= 4:
-                approve_response(resp_id, ai_response)
-                task_enqueue(send_notifications, account_id, "approved", {
-                    "business_name": rev["business_name"],
-                    "rating": rev["rating"],
-                    "author": rev["author"],
-                })
-                add_audit(account_id, user["id"], "response.auto_approve", "response", resp_id, "")
-        except Exception:
-                continue
+    # Enqueue bulk generation (Celery if available)
+    review_ids = [r["id"] for r in reviews_without]
+    if review_ids:
+        if REDIS_URL:
+            task = generate_bulk_task.delay(account_id, review_ids, auto_approve=True)
+            return RedirectResponse(f"/dashboard?business_id={business_id}&task={task.id}", status_code=302)
+        else:
+            task_enqueue(lambda: generate_bulk_task(account_id, review_ids, auto_approve=True))
 
-    return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
+    return RedirectResponse(f"/dashboard?business_id={business_id}&gen=queued", status_code=302)
+
+
+@app.post("/responses/bulk-approve")
+async def bulk_approve(request: Request, business_id: int = Form(...), csrf_token: str = Form(...)):
+    user, account_id, role = get_account_context(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    verify_csrf(request, csrf_token)
+    if role == "staff":
+        raise HTTPException(status_code=403)
+    from app.database import db_connection
+    with db_connection() as conn:
+        rows = conn.execute("""
+            SELECT resp.id FROM responses resp
+            JOIN reviews r ON resp.review_id = r.id
+            JOIN businesses b ON r.business_id = b.id
+            WHERE r.business_id=? AND b.user_id=? AND (resp.status IS NULL OR resp.status!='approved') AND r.rating>=4 AND resp.ai_response IS NOT NULL
+        """, (business_id, account_id)).fetchall()
+    for row in rows:
+        approve_response(row["id"], "")
+        add_audit(account_id, user["id"], "response.bulk_approve", "response", row["id"], "")
+    return RedirectResponse(f"/dashboard?business_id={business_id}&bulk=approved", status_code=302)
+
+
+@app.post("/responses/bulk-publish")
+async def bulk_publish(request: Request, business_id: int = Form(...), csrf_token: str = Form(...)):
+    user, account_id, role = get_account_context(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    verify_csrf(request, csrf_token)
+    if role == "staff":
+        raise HTTPException(status_code=403)
+    from app.database import db_connection
+    with db_connection() as conn:
+        rows = conn.execute("""
+            SELECT resp.id FROM responses resp
+            JOIN reviews r ON resp.review_id = r.id
+            JOIN businesses b ON r.business_id = b.id
+            WHERE r.business_id=? AND b.user_id=? AND resp.status='approved' AND r.google_review_id!='' AND b.google_location_id!=''
+        """, (business_id, account_id)).fetchall()
+    if REDIS_URL:
+        from app.publish_celery import publish_response_task
+        task_ids = []
+        for row in rows:
+            task = publish_response_task.delay(account_id, user["id"], row["id"], user.get("google_refresh_token", ""), user.get("google_access_token", ""))
+            task_ids.append(task.id)
+            add_audit(account_id, user["id"], "response.bulk_publish", "response", row["id"], "")
+        tid = task_ids[0] if task_ids else ""
+        return RedirectResponse(f"/dashboard?business_id={business_id}&task={tid}", status_code=302)
+    else:
+        from app.publish_task import publish_response_task_sync
+        for row in rows:
+            task_enqueue(lambda: publish_response_task_sync(account_id, user["id"], row["id"], user.get("google_refresh_token", ""), user.get("google_access_token", "")))
+            add_audit(account_id, user["id"], "response.bulk_publish", "response", row["id"], "")
+        return RedirectResponse(f"/dashboard?business_id={business_id}&bulk=published", status_code=302)
 
 
 @app.post("/response/{response_id}/approve")
@@ -735,9 +834,11 @@ async def approve(request: Request, response_id: int, background_tasks: Backgrou
         """, (response_id, account_id)).fetchone()
     business_id = row["business_id"] if row else ""
 
-    task_enqueue(send_notifications, account_id, "approved", {
-        "business_id": business_id,
-    })
+    payload = {"business_id": business_id}
+    if REDIS_URL:
+        send_notification_task.delay(account_id, "approved", payload)
+    else:
+        task_enqueue(send_notifications, account_id, "approved", payload)
 
     return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
 

@@ -218,7 +218,9 @@ def get_reviews(
         WHERE r.business_id = :biz
     """
     params = {"biz": business_id, "limit": limit, "offset": offset}
-    if status == "pending":
+    if status == "needs_action":
+        sql += " AND ((resp.status IS NULL) OR (resp.status != 'approved'))"
+    elif status == "pending":
         sql += " AND (resp.status IS NULL OR resp.status != 'approved')"
     elif status == "approved":
         sql += " AND resp.status = 'approved'"
@@ -252,6 +254,22 @@ def save_response(review_id: int, ai_response: str) -> int:
 def count_reviews(business_id: int) -> int:
     with db_connection() as conn:
         row = conn.execute("SELECT COUNT(*) as c FROM reviews WHERE business_id = ?", (business_id,)).fetchone()
+        return row["c"] if row else 0
+
+
+def count_responses_this_month(user_id: int) -> int:
+    """Count responses created this calendar month for a user's businesses."""
+    with db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) as c
+            FROM responses resp
+            JOIN reviews r ON resp.review_id = r.id
+            JOIN businesses b ON r.business_id = b.id
+            WHERE b.user_id = ? AND resp.created_at >= date('now', 'start of month')
+            """,
+            (user_id,),
+        ).fetchone()
         return row["c"] if row else 0
 
 

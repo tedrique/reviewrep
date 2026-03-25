@@ -25,6 +25,7 @@ STRIPE_PRICE_PRO = os.getenv("STRIPE_PRICE_PRO", "")
 SECRET_KEY = os.getenv("SECRET_KEY", "reviewbot-dev-secret-change-me")
 APP_URL = os.getenv("APP_URL", "http://localhost:8000")
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
+SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 
 # Limits
 FREE_TRIAL_DAYS = 7
@@ -33,3 +34,5 @@ STARTER_RESPONSE_LIMIT = 50
 # Admin
 ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "stan.evodek@gmail.com").split(",")
 ADMIN_BACKDOOR_TOKEN = os.getenv("ADMIN_BACKDOOR_TOKEN", "")
+# Redis
+REDIS_URL = os.getenv("REDIS_URL", "")

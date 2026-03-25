@@ -17,6 +17,14 @@
                 </span>
             </div>
             <p class="text-sm text-gray-500 mt-1">Keep approvals under 10s — higher reply rate lifts your Google ranking.</p>
+            <div class="mt-2 flex flex-wrap gap-2 text-xs">
+                {% if plan_limit %}
+                <span class="px-3 py-1 rounded-full bg-gray-100 text-gray-700">Usage this month: {{ responses_used }}/{{ plan_limit }} ({{ responses_left }} left)</span>
+                {% endif %}
+                {% if status == 'trial' and trial_days_left is not none %}
+                <span class="px-3 py-1 rounded-full bg-blue-100 text-blue-700">Trial ends in {{ trial_days_left }} day{{ 's' if trial_days_left != 1 else '' }}</span>
+                {% endif %}
+            </div>
         </div>
 
         {% if current_business %}
@@ -37,6 +45,7 @@
 
             {% if current_business.google_location_id %}
             <form method="POST" action="/business/{{ current_business.id }}/sync" class="inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                 <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded-lg text-xs font-semibold hover:bg-blue-700 transition">
                     Sync Google Reviews
                 </button>
@@ -108,39 +117,49 @@
         {% if r.rating <= 2 %}{% set stats.negative = stats.negative + 1 %}{% endif %}
     {% endfor %}
 
-    <div class="grid md:grid-cols-4 gap-3 md:gap-4 mb-6">
-        <div class="bg-white rounded-xl border border-gray-200 p-4">
-            <div class="text-sm text-gray-500">Pending approval</div>
-            <div class="text-2xl font-bold text-gray-900">{{ stats.pending }}</div>
-        </div>
-        <div class="bg-white rounded-xl border border-gray-200 p-4">
-            <div class="text-sm text-gray-500">Need AI draft</div>
-            <div class="text-2xl font-bold text-gray-900">{{ stats.missing }}</div>
-        </div>
-        <div class="bg-white rounded-xl border border-gray-200 p-4">
-            <div class="text-sm text-gray-500">1–2★ to rescue</div>
-            <div class="text-2xl font-bold text-rose-600">{{ stats.negative }}</div>
-        </div>
+    <div class="grid md:grid-cols-2 gap-3 md:gap-4 mb-4">
         <div class="bg-white rounded-xl border border-gray-200 p-4">
             <div class="text-sm text-gray-500">Total reviews</div>
             <div class="text-2xl font-bold text-gray-900">{{ stats.total }}</div>
         </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-sm text-gray-500">Ready to approve (4–5★)</div>
+            <div class="text-2xl font-bold text-emerald-700">{{ approve_ready }}</div>
+        </div>
+    </div>
+
+    {% include "partials/analytics_cards.html" %}
+    {% include "partials/activity_feed.html" %}
+    {% include "partials/bulk_status.html" %}
+
+    <!-- Mini chart -->
+    <div class="bg-white rounded-xl border border-gray-200 p-4 mb-6">
+        <div class="flex justify-between items-center mb-2">
+            <div class="text-sm font-semibold text-gray-700">Reviews last 7 days</div>
+            <div class="text-xs text-gray-500">{{ weekly_data|sum }} total</div>
+        </div>
+        <canvas id="weeklyChart" width="600" height="160"></canvas>
+        {% if weekly_labels %}
+        <script>
+            window.addEventListener("load", () => {
+                renderBarChart("weeklyChart", {{ weekly_labels|tojson }}, {{ weekly_data|tojson }});
+            });
+        </script>
+        {% else %}
+        <p class="text-xs text-gray-400 mt-2">No data yet.</p>
+        {% endif %}
     </div>
 
     <div class="grid md:grid-cols-3 gap-3 md:gap-4 mb-6">
-        <div class="bg-white rounded-xl border border-gray-200 p-4">
-            <div class="text-sm text-gray-500">Approved replies</div>
-            <div class="text-2xl font-bold text-gray-900">{{ approved_reviews }}/{{ total_reviews }}</div>
-        </div>
-        <div class="bg-white rounded-xl border border-gray-200 p-4">
-            <div class="text-sm text-gray-500">Published to Google</div>
-            <div class="text-2xl font-bold text-emerald-700">{{ published_reviews }}</div>
-        </div>
-        <div class="bg-white rounded-xl border border-gray-200 p-4">
-            <div class="text-sm text-gray-500">Avg time to publish</div>
-            <div class="text-2xl font-bold text-gray-900">
-                {% if avg_ttr %}{{ (avg_ttr/3600)|round(1) }}h{% else %}—{% endif %}
-            </div>
+        <div class="md:col-span-3 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-xl p-4 flex flex-wrap items-center gap-3">
+            <div class="text-sm text-gray-700">Stay unlimited? Upgrade to Pro.</div>
+            <a href="/pricing" class="bg-blue-600 text-white text-xs px-4 py-2 rounded-lg">See plans</a>
+            {% if status == 'trial' %}
+            <span class="text-xs text-blue-700 bg-blue-100 px-3 py-1 rounded-full">Trial ends in {{ trial_days_left if trial_days_left is not none else '?' }} days</span>
+            {% endif %}
+            {% if plan_limit %}
+            <span class="text-xs text-gray-600">This month: {{ responses_used }}/{{ plan_limit }}</span>
+            {% endif %}
         </div>
     </div>
 
@@ -164,12 +183,32 @@
             <button type="submit" class="bg-gray-900 text-white px-4 py-2 rounded-lg text-sm">Apply</button>
         </form>
         {% if reviews %}
-        <form method="POST" action="/review/{{ reviews[0].id }}/generate-all" class="ml-auto">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-            <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-blue-700">
-                Generate All
-            </button>
-        </form>
+        <div class="flex gap-2 ml-auto">
+            <form method="POST" action="/review/{{ reviews[0].id }}/generate-all">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-blue-700">
+                    Generate All (async)
+                </button>
+            </form>
+            {% if approve_ready > 0 %}
+            <form method="POST" action="/responses/bulk-approve">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <input type="hidden" name="business_id" value="{{ current_business.id }}">
+                <button type="submit" class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-emerald-700">
+                    Approve 4–5★ ({{ approve_ready }})
+                </button>
+            </form>
+            {% endif %}
+            {% if publish_ready > 0 %}
+            <form method="POST" action="/responses/bulk-publish">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <input type="hidden" name="business_id" value="{{ current_business.id }}">
+                <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-indigo-700">
+                    Publish approved ({{ publish_ready }})
+                </button>
+            </form>
+            {% endif %}
+        </div>
         {% endif %}
     </div>
 
@@ -280,6 +319,13 @@
         {% endif %}
     </div>
 </div>
+{% endif %}
+
+{% if request.query_params.get('task') %}
+<div id="task-banner" class="fixed bottom-4 right-4 bg-white border border-blue-200 shadow-lg rounded-xl px-4 py-3 text-sm text-blue-700">
+    <span id="task-status">Task queued...</span>
+</div>
+<script>pollTask("{{ request.query_params.get('task') }}");</script>
 {% endif %}
 
 {% endblock %}

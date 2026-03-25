@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Admin OTP Login{% endblock %}
+{% block content %}
+<div class="max-w-md mx-auto px-4 py-16">
+    <div class="bg-white rounded-2xl border border-gray-200 p-6 space-y-4">
+        <h1 class="text-xl font-bold">Admin Login</h1>
+        {% if step == 'request' %}
+        <form method="POST" action="/admin-otp/request" class="space-y-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div>
+                <label class="block text-sm text-gray-600 mb-1">Admin email</label>
+                <input type="email" name="email" required class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="admin@example.com">
+            </div>
+            <button type="submit" class="w-full bg-gray-900 text-white py-2 rounded-lg text-sm">Send code</button>
+        </form>
+        {% elif step == 'verify' %}
+        <p class="text-sm text-gray-500">We emailed a 6-digit code to {{ email }}. Enter it below.</p>
+        <form method="POST" action="/admin-otp/verify" class="space-y-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="email" value="{{ email }}">
+            <div>
+                <label class="block text-sm text-gray-600 mb-1">Code</label>
+                <input type="text" name="code" pattern="\\d{6}" maxlength="6" required class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="123456">
+            </div>
+            <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded-lg text-sm">Verify & Login</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

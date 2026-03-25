@@ -65,6 +65,34 @@
     <main>
         {% block content %}{% endblock %}
     </main>
+    <script src="/static/chart.js"></script>
+    <script>
+    function pollTask(taskId) {
+        if (!taskId) return;
+        const banner = document.getElementById('task-banner');
+        const statusText = document.getElementById('task-status');
+        async function check() {
+            const res = await fetch(`/tasks/${taskId}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            statusText.textContent = `Task ${data.state}`;
+            banner.classList.remove('hidden');
+            if (data.state === 'SUCCESS' || data.state === 'FAILURE') {
+                statusText.textContent = data.state === 'SUCCESS' ? 'Done' : `Failed: ${data.result || ''}`;
+                banner.classList.remove('bg-white','text-blue-700','border-blue-200');
+                if (data.state === 'FAILURE') {
+                    banner.classList.add('bg-rose-50','text-rose-700','border-rose-200');
+                } else {
+                    banner.classList.add('bg-emerald-50','text-emerald-700','border-emerald-200');
+                }
+                setTimeout(() => window.location.reload(), data.state === 'SUCCESS' ? 1200 : 4000);
+            } else {
+                setTimeout(check, 2000);
+            }
+        }
+        check();
+    }
+    </script>
     <script>
     document.addEventListener("DOMContentLoaded", () => {
         const token = "{{ csrf_token(request) }}";
@@ -78,6 +106,15 @@
             }
         });
     });
+    </script>
+    <div id="task-banner" class="hidden fixed bottom-4 right-4 bg-white border border-blue-200 shadow-lg rounded-xl px-4 py-3 text-sm text-blue-700">
+        <span id="task-status">Task queued...</span>
+    </div>
+    <script>
+    const taskParam = "{{ request.query_params.get('task') or '' }}";
+    if (taskParam) {
+        pollTask(taskParam);
+    }
     </script>
 </body>
 </html>

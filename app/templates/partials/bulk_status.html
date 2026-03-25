@@ -1,0 +1,17 @@
+{% if request.query_params.get("bulk") == "approved" %}
+<div class="mb-4 bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-lg text-sm">
+    Bulk approve queued/completed. Check statuses in the list.
+</div>
+{% elif request.query_params.get("bulk") == "published" %}
+<div class="mb-4 bg-indigo-50 border border-indigo-200 text-indigo-700 px-4 py-3 rounded-lg text-sm">
+    Bulk publish queued. Publishing will complete shortly.
+</div>
+{% elif request.query_params.get("pub") == "queued" %}
+<div class="mb-4 bg-indigo-50 border border-indigo-200 text-indigo-700 px-4 py-3 rounded-lg text-sm">
+    Publish queued. It will publish soon.
+</div>
+{% elif request.query_params.get("gen") == "queued" %}
+<div class="mb-4 bg-blue-50 border border-blue-200 text-blue-700 px-4 py-3 rounded-lg text-sm">
+    Generation queued. Refresh in a moment to see drafts.
+</div>
+{% endif %}
