@@ -1180,3 +1180,81 @@ async def admin_panel(request: Request):
         "user": user, "stats": stats, "tickets": tickets, "users": users_list,
         "audit_log": audit_log, "dead_letters": dead_letters,
     })
+
+
+# --- Admin API: logs, health, debug (secret token) ---
+
+import logging
+import io
+
+_log_buffer = io.StringIO()
+_log_handler = logging.StreamHandler(_log_buffer)
+_log_handler.setLevel(logging.WARNING)
+_log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logging.getLogger().addHandler(_log_handler)
+logging.getLogger("uvicorn.error").addHandler(_log_handler)
+
+
+@app.get("/api/health")
+async def health():
+    """Public health check for Railway."""
+    return {"status": "ok", "version": "1.0"}
+
+
+@app.get("/api/debug/logs")
+async def debug_logs(request: Request, token: str = "", lines: int = 50):
+    """Get recent error/warning logs. Requires admin token or admin session."""
+    from app.config import ADMIN_EMAILS, SECRET_KEY
+    # Auth: either admin session or secret token in query
+    user = get_current_user(request)
+    is_admin = user and user["email"] in ADMIN_EMAILS
+    is_token = token == SECRET_KEY
+
+    if not is_admin and not is_token:
+        raise HTTPException(status_code=404)
+
+    log_content = _log_buffer.getvalue()
+    log_lines = log_content.strip().split("\n") if log_content.strip() else []
+
+    from app.database import db_connection
+    with db_connection() as conn:
+        recent_errors = [dict(r) for r in conn.execute(
+            "SELECT * FROM audit_log WHERE action LIKE '%error%' ORDER BY created_at DESC LIMIT ?", (lines,)
+        ).fetchall()]
+
+        db_stats = {
+            "users": conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"],
+            "businesses": conn.execute("SELECT COUNT(*) as c FROM businesses").fetchone()["c"],
+            "reviews": conn.execute("SELECT COUNT(*) as c FROM reviews").fetchone()["c"],
+            "responses": conn.execute("SELECT COUNT(*) as c FROM responses").fetchone()["c"],
+        }
+
+    dead = get_dead_letters()
+
+    return {
+        "status": "ok",
+        "db": db_stats,
+        "recent_logs": log_lines[-lines:],
+        "dead_letters": dead[-10:],
+        "audit_errors": recent_errors,
+    }
+
+
+@app.get("/api/debug/db")
+async def debug_db(request: Request, token: str = "", table: str = "users", limit: int = 10):
+    """Peek at DB tables. Admin only."""
+    from app.config import ADMIN_EMAILS, SECRET_KEY
+    user = get_current_user(request)
+    is_admin = user and user["email"] in ADMIN_EMAILS
+    is_token = token == SECRET_KEY
+    if not is_admin and not is_token:
+        raise HTTPException(status_code=404)
+
+    allowed = {"users", "businesses", "reviews", "responses", "support_tickets", "audit_log", "team_memberships"}
+    if table not in allowed:
+        return {"error": f"table must be one of {allowed}"}
+
+    from app.database import db_connection
+    with db_connection() as conn:
+        rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT ?", (limit,)).fetchall()]
+    return {"table": table, "count": len(rows), "rows": rows}
