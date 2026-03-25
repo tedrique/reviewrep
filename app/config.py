@@ -28,3 +28,6 @@ DEBUG = os.getenv("DEBUG", "true").lower() == "true"
 # Limits
 FREE_TRIAL_DAYS = 7
 STARTER_RESPONSE_LIMIT = 50
+
+# Admin
+ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "stan.evodek@gmail.com").split(",")

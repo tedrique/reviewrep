@@ -556,3 +556,44 @@ async def profile_delete(request: Request):
         conn.execute("DELETE FROM users WHERE id=?", (user["id"],))
     request.session.clear()
     return RedirectResponse("/", status_code=302)
+
+
+# --- Admin Panel (hidden, only for ADMIN_EMAILS) ---
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_panel(request: Request):
+    from app.config import ADMIN_EMAILS
+    user = get_current_user(request)
+    if not user or user["email"] not in ADMIN_EMAILS:
+        raise HTTPException(status_code=404)
+
+    from app.database import db_connection
+    with db_connection() as conn:
+        total_users = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+        active_trials = conn.execute("SELECT COUNT(*) as c FROM users WHERE subscription_status='trial'").fetchone()["c"]
+        paying = conn.execute("SELECT COUNT(*) as c FROM users WHERE subscription_status='active'").fetchone()["c"]
+        total_businesses = conn.execute("SELECT COUNT(*) as c FROM businesses").fetchone()["c"]
+        total_reviews = conn.execute("SELECT COUNT(*) as c FROM reviews").fetchone()["c"]
+        total_responses = conn.execute("SELECT COUNT(*) as c FROM responses").fetchone()["c"]
+        approved = conn.execute("SELECT COUNT(*) as c FROM responses WHERE status='approved'").fetchone()["c"]
+
+        starter_count = conn.execute("SELECT COUNT(*) as c FROM users WHERE subscription_status='active' AND subscription_plan='starter'").fetchone()["c"]
+        pro_count = conn.execute("SELECT COUNT(*) as c FROM users WHERE subscription_status='active' AND subscription_plan='pro'").fetchone()["c"]
+        mrr = starter_count * 19 + pro_count * 39
+
+        conn.execute("CREATE TABLE IF NOT EXISTS support_tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT, subject TEXT, message TEXT, status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')))")
+        open_tickets = conn.execute("SELECT COUNT(*) as c FROM support_tickets WHERE status='open'").fetchone()["c"]
+        tickets = [dict(r) for r in conn.execute("SELECT * FROM support_tickets ORDER BY created_at DESC LIMIT 20").fetchall()]
+        users_list = [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()]
+
+    stats = {
+        "total_users": total_users, "active_trials": active_trials,
+        "paying_customers": paying, "mrr": mrr,
+        "total_businesses": total_businesses, "total_reviews": total_reviews,
+        "total_responses": total_responses, "approved_responses": approved,
+        "open_tickets": open_tickets,
+    }
+
+    return templates.TemplateResponse(request=request, name="admin.html", context={
+        "user": user, "stats": stats, "tickets": tickets, "users": users_list,
+    })
