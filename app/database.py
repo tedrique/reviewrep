@@ -181,7 +181,7 @@ def add_review(business_id: int, author: str, rating: int, text: str, google_rev
         return cursor.lastrowid
 
 
-def get_reviews(business_id: int) -> list[dict]:
+def get_reviews(business_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
     with db_connection() as conn:
         rows = conn.execute("""
             SELECT r.*, resp.ai_response, resp.edited_response, resp.status as response_status, resp.id as response_id
@@ -189,7 +189,8 @@ def get_reviews(business_id: int) -> list[dict]:
             LEFT JOIN responses resp ON resp.review_id = r.id
             WHERE r.business_id = ?
             ORDER BY r.created_at DESC
-        """, (business_id,)).fetchall()
+            LIMIT ? OFFSET ?
+        """, (business_id, limit, offset)).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -203,6 +204,12 @@ def save_response(review_id: int, ai_response: str) -> int:
         cursor = conn.execute("INSERT INTO responses (review_id, ai_response, status) VALUES (?, ?, 'pending')",
                               (review_id, ai_response))
         return cursor.lastrowid
+
+
+def count_reviews(business_id: int) -> int:
+    with db_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) as c FROM reviews WHERE business_id = ?", (business_id,)).fetchone()
+        return row["c"] if row else 0
 
 
 def approve_response(response_id: int, edited_text: str = "") -> None:

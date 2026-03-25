@@ -127,6 +127,23 @@
         </div>
     </div>
 
+    <div class="grid md:grid-cols-3 gap-3 md:gap-4 mb-6">
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-sm text-gray-500">Approved replies</div>
+            <div class="text-2xl font-bold text-gray-900">{{ approved_reviews }}/{{ total_reviews }}</div>
+        </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-sm text-gray-500">Published to Google</div>
+            <div class="text-2xl font-bold text-emerald-700">{{ published_reviews }}</div>
+        </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-sm text-gray-500">Avg time to publish</div>
+            <div class="text-2xl font-bold text-gray-900">
+                {% if avg_ttr %}{{ (avg_ttr/3600)|round(1) }}h{% else %}—{% endif %}
+            </div>
+        </div>
+    </div>
+
     <div class="bg-white rounded-xl border border-gray-200 p-3 md:p-4 mb-6 flex flex-wrap items-center gap-2 md:gap-3 text-sm">
         <span class="text-gray-500 mr-1">Quick filters:</span>
         <button type="button" data-filter="all" class="filter-btn bg-gray-900 text-white px-3 py-1.5 rounded-lg">All</button>
@@ -242,6 +259,20 @@
     </div>
     {% endif %}
 </div>
+
+{% if total_pages > 1 %}
+<div class="max-w-6xl mx-auto px-4 pb-8 flex justify-between items-center text-sm text-gray-600">
+    <div>Page {{ page }} of {{ total_pages }}</div>
+    <div class="flex gap-2">
+        {% if page > 1 %}
+        <a href="/dashboard?business_id={{ current_business.id }}&page={{ page - 1 }}" class="px-3 py-1.5 border border-gray-200 rounded-lg">Prev</a>
+        {% endif %}
+        {% if page < total_pages %}
+        <a href="/dashboard?business_id={{ current_business.id }}&page={{ page + 1 }}" class="px-3 py-1.5 border border-gray-200 rounded-lg">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
 
 <script>
 document.addEventListener("DOMContentLoaded", () => {

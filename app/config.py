@@ -10,6 +10,7 @@ BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 DB_PATH = DATA_DIR / "reviewbot.db"
+DB_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_PATH}")
 
 # API Keys
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -31,3 +32,4 @@ STARTER_RESPONSE_LIMIT = 50
 
 # Admin
 ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "stan.evodek@gmail.com").split(",")
+ADMIN_BACKDOOR_TOKEN = os.getenv("ADMIN_BACKDOOR_TOKEN", "")

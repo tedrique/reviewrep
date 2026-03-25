@@ -1,14 +1,16 @@
 """ReviewReply AI — FastAPI web application."""
-from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi import FastAPI, Request, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from pathlib import Path
+import secrets
+import time
 
 from app.config import SECRET_KEY, ANTHROPIC_API_KEY, DEBUG
 from app.database import (
-    init_db, get_user, get_businesses, get_reviews,
+    init_db, get_user, get_businesses, get_reviews, count_reviews,
     create_business, add_review, save_response, approve_response,
     get_notification_prefs, save_notification_pref,
     get_team_members, create_team_invite, attach_member_user, remove_team_member,
@@ -21,10 +23,34 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
 templates_dir = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
+templates.env.globals["csrf_token"] = ensure_csrf_token
 
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+# Simple in-memory rate limiting per IP (best-effort)
+_rate_bucket = {}
+RATE_LIMIT = 120  # requests
+RATE_WINDOW = 60  # seconds
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    bucket = _rate_bucket.get(ip, [])
+    bucket = [t for t in bucket if now - t < RATE_WINDOW]
+    bucket.append(now)
+    _rate_bucket[ip] = bucket
+    if len(bucket) > RATE_LIMIT:
+        return HTMLResponse("Rate limit exceeded", status_code=429)
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        print(f"[error] {request.url} {e}")
+        raise
+    return response
 
 
 @app.on_event("startup")
@@ -58,6 +84,20 @@ def require_auth(request: Request) -> dict:
     if not user:
         raise HTTPException(status_code=302, headers={"Location": "/login"})
     return user
+
+
+def ensure_csrf_token(request: Request) -> str:
+    token = request.session.get("csrf_token")
+    if not token:
+        token = secrets.token_hex(32)
+        request.session["csrf_token"] = token
+    return token
+
+
+def verify_csrf(request: Request, token: str):
+    session_token = request.session.get("csrf_token")
+    if not session_token or not token or token != session_token:
+        raise HTTPException(status_code=400, detail="CSRF validation failed")
 
 
 # --- Public Routes ---
@@ -189,11 +229,19 @@ async def billing_webhook(request: Request):
 
 @app.get("/admin-login", response_class=HTMLResponse)
 async def admin_login_page(request: Request):
+    from app.config import ADMIN_BACKDOOR_TOKEN
+    token = request.query_params.get("token", "")
+    if ADMIN_BACKDOOR_TOKEN and token != ADMIN_BACKDOOR_TOKEN:
+        raise HTTPException(status_code=404)
     return templates.TemplateResponse(request=request, name="admin_login.html")
 
 
 @app.post("/admin-login")
-async def demo_login(request: Request, email: str = Form(...), name: str = Form(...)):
+async def demo_login(request: Request, email: str = Form(...), name: str = Form(...), token: str = Form(""), csrf_token: str = Form(...)):
+    from app.config import ADMIN_BACKDOOR_TOKEN
+    if ADMIN_BACKDOOR_TOKEN and token != ADMIN_BACKDOOR_TOKEN:
+        raise HTTPException(status_code=404)
+    verify_csrf(request, csrf_token)
     from app.database import create_user, db_connection
 
     # Check if user already exists
@@ -230,6 +278,8 @@ async def dashboard(request: Request):
     businesses = get_businesses(account_id)
     current_business = None
     reviews = []
+    page = int(request.query_params.get("page", 1))
+    per_page = 20
 
     business_id = request.query_params.get("business_id")
     if businesses:
@@ -237,7 +287,39 @@ async def dashboard(request: Request):
             current_business = next((b for b in businesses if str(b["id"]) == business_id), businesses[0])
         else:
             current_business = businesses[0]
-        reviews = get_reviews(current_business["id"])
+        total = count_reviews(current_business["id"])
+        offset = (page - 1) * per_page
+        reviews = get_reviews(current_business["id"], limit=per_page, offset=offset)
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        # Insights
+        from app.database import db_connection
+        with db_connection() as conn:
+            approved = conn.execute("""
+                SELECT COUNT(*) as c FROM responses resp
+                JOIN reviews r ON resp.review_id = r.id
+                JOIN businesses b ON r.business_id = b.id
+                WHERE b.id = ? AND resp.status='approved'
+            """, (current_business["id"],)).fetchone()["c"]
+            published = conn.execute("""
+                SELECT COUNT(*) as c FROM responses resp
+                JOIN reviews r ON resp.review_id = r.id
+                JOIN businesses b ON r.business_id = b.id
+                WHERE b.id = ? AND resp.status='approved' AND resp.published_at != ''
+            """, (current_business["id"],)).fetchone()["c"]
+            avg_ttr_row = conn.execute("""
+                SELECT AVG(strftime('%s', resp.published_at) - strftime('%s', r.created_at)) as s
+                FROM responses resp
+                JOIN reviews r ON resp.review_id = r.id
+                JOIN businesses b ON r.business_id = b.id
+                WHERE b.id = ? AND resp.published_at != ''
+            """, (current_business["id"],)).fetchone()
+            avg_ttr = avg_ttr_row["s"] if avg_ttr_row and avg_ttr_row["s"] else None
+    else:
+        total_pages = 1
+        total = 0
+        approved = 0
+        published = 0
+        avg_ttr = None
 
     return templates.TemplateResponse(request=request, name="dashboard.html", context={
         "user": user,
@@ -245,6 +327,12 @@ async def dashboard(request: Request):
         "businesses": businesses,
         "current_business": current_business,
         "reviews": reviews,
+        "page": page,
+        "total_pages": total_pages,
+        "total_reviews": total,
+        "approved_reviews": approved,
+        "published_reviews": published,
+        "avg_ttr": avg_ttr,
     })
 
 
@@ -253,6 +341,7 @@ async def dashboard(request: Request):
 @app.post("/business/add")
 async def add_business(
     request: Request,
+    csrf_token: str = Form(...),
     name: str = Form(...),
     business_type: str = Form(...),
     location: str = Form(...),
@@ -263,6 +352,7 @@ async def add_business(
         return RedirectResponse("/login", status_code=302)
     if role == "staff":
         raise HTTPException(status_code=403, detail="Staff cannot add businesses")
+    verify_csrf(request, csrf_token)
     create_business(account_id, name, business_type, location, tone)
     return RedirectResponse("/dashboard", status_code=302)
 
@@ -272,6 +362,8 @@ async def add_business(
 @app.post("/review/add")
 async def add_review_manual(
     request: Request,
+    background_tasks: BackgroundTasks,
+    csrf_token: str = Form(...),
     business_id: int = Form(...),
     author: str = Form("Customer"),
     rating: int = Form(...),
@@ -285,23 +377,21 @@ async def add_review_manual(
         biz = conn.execute("SELECT * FROM businesses WHERE id = ? AND user_id = ?", (business_id, account_id)).fetchone()
         if not biz:
             raise HTTPException(status_code=403)
+    verify_csrf(request, csrf_token)
     add_review(business_id, author, rating, text)
-    try:
-        send_notifications(account_id, "new_review", {
-            "business_name": biz["name"],
-            "author": author,
-            "rating": rating,
-            "text": text,
-        })
-    except Exception:
-        pass
+    background_tasks.add_task(send_notifications, account_id, "new_review", {
+        "business_name": biz["name"],
+        "author": author,
+        "rating": rating,
+        "text": text,
+    })
     return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
 
 
 # --- Google Business Sync ---
 
 @app.post("/business/{business_id}/sync")
-async def sync_reviews(request: Request, business_id: int):
+async def sync_reviews(request: Request, business_id: int, background_tasks: BackgroundTasks, csrf_token: str = Form(...)):
     """Pull latest reviews from Google Business Profile."""
     user, account_id, role = get_account_context(request)
     if not user:
@@ -315,7 +405,8 @@ async def sync_reviews(request: Request, business_id: int):
     with db_connection() as conn:
         biz = conn.execute("SELECT * FROM businesses WHERE id=? AND user_id=?", (business_id, account_id)).fetchone()
         if not biz or not biz["google_location_id"]:
-            return RedirectResponse(f"/dashboard?business_id={business_id}&error=no_location", status_code=302)
+        return RedirectResponse(f"/dashboard?business_id={business_id}&error=no_location", status_code=302)
+    verify_csrf(request, csrf_token)
 
     # Refresh token if needed
     from app.google_reviews import get_reviews as fetch_google_reviews, refresh_access_token
@@ -342,25 +433,23 @@ async def sync_reviews(request: Request, business_id: int):
             add_review(business_id, rev["author"], rev["rating"], rev["text"],
                        google_review_id=rev["google_review_id"], review_time=rev["time"])
             imported += 1
-            try:
-                send_notifications(account_id, "new_review", {
-                    "business_name": biz["name"],
-                    "author": rev["author"],
-                    "rating": rev["rating"],
-                    "text": rev["text"],
-                })
-            except Exception:
-                pass
+            background_tasks.add_task(send_notifications, account_id, "new_review", {
+                "business_name": biz["name"],
+                "author": rev["author"],
+                "rating": rev["rating"],
+                "text": rev["text"],
+            })
 
     return RedirectResponse(f"/dashboard?business_id={business_id}&synced={imported}", status_code=302)
 
 
 @app.post("/response/{response_id}/publish")
-async def publish_response(request: Request, response_id: int):
+async def publish_response(request: Request, response_id: int, csrf_token: str = Form(...)):
     """Publish an approved response to Google."""
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    verify_csrf(request, csrf_token)
 
     from app.database import db_connection
     with db_connection() as conn:
@@ -433,6 +522,8 @@ async def link_google_location(request: Request, location_name: str = Form(...),
     user, account_id, role = get_account_context(request)
     if not user or role == "staff":
         return RedirectResponse("/login", status_code=302)
+    form = await request.form()
+    verify_csrf(request, form.get("csrf_token", ""))
 
     from app.database import db_connection
     businesses = get_businesses(account_id)
@@ -452,10 +543,11 @@ async def link_google_location(request: Request, location_name: str = Form(...),
 
 
 @app.post("/review/{review_id}/generate")
-async def generate_ai_response(request: Request, review_id: int):
+async def generate_ai_response(request: Request, review_id: int, background_tasks: BackgroundTasks, csrf_token: str = Form(...)):
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    verify_csrf(request, csrf_token)
 
     from app.database import db_connection
     with db_connection() as conn:
@@ -488,32 +580,27 @@ async def generate_ai_response(request: Request, review_id: int):
     response_id = save_response(review_id, ai_response)
     if review["auto_approve_high"] and review["rating"] >= 4:
         approve_response(response_id, ai_response)
-        try:
-            send_notifications(account_id, "approved", {
-                "business_name": review["business_name"],
-                "rating": review["rating"],
-                "author": review["author"],
-            })
-        except Exception:
-            pass
+        background_tasks.add_task(send_notifications, account_id, "approved", {
+            "business_name": review["business_name"],
+            "rating": review["rating"],
+            "author": review["author"],
+        })
     else:
-        try:
-            send_notifications(account_id, "draft_ready", {
-                "business_name": review["business_name"],
-                "rating": review["rating"],
-                "author": review["author"],
-            })
-        except Exception:
-            pass
+        background_tasks.add_task(send_notifications, account_id, "draft_ready", {
+            "business_name": review["business_name"],
+            "rating": review["rating"],
+            "author": review["author"],
+        })
     return RedirectResponse(f"/dashboard?business_id={review['business_id']}", status_code=302)
 
 
 @app.post("/review/{review_id}/generate-all")
-async def generate_all_responses(request: Request, review_id: int):
+async def generate_all_responses(request: Request, review_id: int, background_tasks: BackgroundTasks, csrf_token: str = Form(...)):
     """Generate AI responses for all reviews without one."""
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    verify_csrf(request, csrf_token)
 
     # Get business_id from the review
     from app.database import db_connection
@@ -553,14 +640,11 @@ async def generate_all_responses(request: Request, review_id: int):
             resp_id = save_response(rev["id"], ai_response)
             if rev["auto_approve_high"] and rev["rating"] >= 4:
                 approve_response(resp_id, ai_response)
-                try:
-                    send_notifications(account_id, "approved", {
-                        "business_name": rev["business_name"],
-                        "rating": rev["rating"],
-                        "author": rev["author"],
-                    })
-                except Exception:
-                    pass
+                background_tasks.add_task(send_notifications, account_id, "approved", {
+                    "business_name": rev["business_name"],
+                    "rating": rev["rating"],
+                    "author": rev["author"],
+                })
         except Exception:
             continue
 
@@ -568,12 +652,13 @@ async def generate_all_responses(request: Request, review_id: int):
 
 
 @app.post("/response/{response_id}/approve")
-async def approve(request: Request, response_id: int):
+async def approve(request: Request, response_id: int, background_tasks: BackgroundTasks):
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
 
     form = await request.form()
+    verify_csrf(request, form.get("csrf_token", ""))
     edited = form.get("edited_response", "")
     approve_response(response_id, edited)
 
@@ -597,12 +682,9 @@ async def approve(request: Request, response_id: int):
         """, (response_id, account_id)).fetchone()
     business_id = row["business_id"] if row else ""
 
-    try:
-        send_notifications(account_id, "approved", {
-            "business_id": business_id,
-        })
-    except Exception:
-        pass
+    background_tasks.add_task(send_notifications, account_id, "approved", {
+        "business_id": business_id,
+    })
 
     return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
 
@@ -625,6 +707,7 @@ async def settings_page(request: Request):
 async def update_business(
     request: Request,
     business_id: int,
+    csrf_token: str = Form(...),
     name: str = Form(...),
     business_type: str = Form(...),
     location: str = Form(...),
@@ -640,6 +723,7 @@ async def update_business(
         return RedirectResponse("/login", status_code=302)
     if role == "staff":
         raise HTTPException(status_code=403)
+    verify_csrf(request, csrf_token)
     from app.database import db_connection
     with db_connection() as conn:
         conn.execute(
@@ -658,6 +742,7 @@ async def update_notifications(request: Request):
     if role == "staff":
         raise HTTPException(status_code=403)
     form = await request.form()
+    verify_csrf(request, form.get("csrf_token", ""))
     events = form.getlist("events")
     events_str = ",".join(events) if events else "new_review,draft_ready,approved"
     email_target = form.get("email_target", "").strip()
@@ -727,20 +812,22 @@ async def onboarding(request: Request):
 
 
 @app.post("/onboarding/step1")
-async def onboarding_step1(request: Request, name: str = Form(...), business_type: str = Form(...), location: str = Form(...)):
+async def onboarding_step1(request: Request, csrf_token: str = Form(...), name: str = Form(...), business_type: str = Form(...), location: str = Form(...)):
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    verify_csrf(request, csrf_token)
     business_id = create_business(account_id, name, business_type, location)
     request.session["onboarding_business_id"] = business_id
     return templates.TemplateResponse(request=request, name="onboarding.html", context={"user": user, "step": 2})
 
 
 @app.post("/onboarding/step2")
-async def onboarding_step2(request: Request, tone: str = Form(...), owner_name: str = Form("")):
+async def onboarding_step2(request: Request, csrf_token: str = Form(...), tone: str = Form(...), owner_name: str = Form("")):
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    verify_csrf(request, csrf_token)
     business_id = request.session.get("onboarding_business_id")
     if business_id:
         from app.database import db_connection
@@ -750,10 +837,11 @@ async def onboarding_step2(request: Request, tone: str = Form(...), owner_name: 
 
 
 @app.post("/onboarding/step3")
-async def onboarding_step3(request: Request, author: str = Form("Customer"), rating: int = Form(...), text: str = Form(...)):
+async def onboarding_step3(request: Request, csrf_token: str = Form(...), author: str = Form("Customer"), rating: int = Form(...), text: str = Form(...)):
     user, account_id, role = get_account_context(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    verify_csrf(request, csrf_token)
     businesses = get_businesses(account_id)
     if not businesses:
         return RedirectResponse("/onboarding", status_code=302)
@@ -794,6 +882,8 @@ async def support_page(request: Request):
 @app.post("/support")
 async def support_submit(request: Request, email: str = Form(...), subject: str = Form(...), message: str = Form(...)):
     user = get_current_user(request)
+    form = await request.form()
+    verify_csrf(request, form.get("csrf_token", ""))
     from app.database import db_connection
     with db_connection() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS support_tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT, subject TEXT, message TEXT, status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')))")
@@ -825,6 +915,8 @@ async def team_invite(request: Request, email: str = Form(...), role: str = Form
         return RedirectResponse("/login", status_code=302)
     if user_role == "staff":
         raise HTTPException(status_code=403)
+    form = await request.form()
+    verify_csrf(request, form.get("csrf_token", ""))
     create_team_invite(account_id, email, role)
     try:
         from app.email_service import send_email
@@ -839,6 +931,8 @@ async def team_remove(request: Request, member_id: int):
     user, account_id, role = get_account_context(request)
     if not user or role == "staff":
         return RedirectResponse("/login", status_code=302)
+    form = await request.form()
+    verify_csrf(request, form.get("csrf_token", ""))
     remove_team_member(account_id, member_id)
     return RedirectResponse("/team", status_code=302)
 
@@ -854,10 +948,11 @@ async def profile_page(request: Request):
 
 
 @app.post("/profile")
-async def profile_update(request: Request, name: str = Form(...)):
+async def profile_update(request: Request, csrf_token: str = Form(...), name: str = Form(...)):
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    verify_csrf(request, csrf_token)
     from app.database import db_connection
     with db_connection() as conn:
         conn.execute("UPDATE users SET name=?, updated_at=datetime('now') WHERE id=?", (name, user["id"]))
@@ -869,6 +964,8 @@ async def profile_delete(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    form = await request.form()
+    verify_csrf(request, form.get("csrf_token", ""))
     from app.database import db_connection
     with db_connection() as conn:
         conn.execute("DELETE FROM responses WHERE review_id IN (SELECT id FROM reviews WHERE business_id IN (SELECT id FROM businesses WHERE user_id=?))", (user["id"],))
