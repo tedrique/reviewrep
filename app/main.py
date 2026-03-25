@@ -12,7 +12,7 @@ import sentry_sdk
 from app.config import SECRET_KEY, ANTHROPIC_API_KEY, DEBUG, ADMIN_BACKDOOR_TOKEN, SENTRY_DSN, REDIS_URL
 from app.database import (
     init_db, get_user, get_businesses, get_reviews, count_reviews,
-    create_business, add_review, save_response, approve_response,
+    create_business, add_review, save_response, save_response_with_flags, approve_response,
     get_notification_prefs, save_notification_pref,
     get_team_members, create_team_invite, attach_member_user, remove_team_member,
     add_audit, count_responses_this_month, get_dead_letters,
@@ -686,12 +686,14 @@ async def generate_ai_response(request: Request, review_id: int, background_task
     elif sub_status not in ("trial", "active"):
         return RedirectResponse("/pricing?expired=1", status_code=302)
 
-    from app.database import db_connection
+    from app.database import db_connection  # noqa
     with db_connection() as conn:
         review = conn.execute("""
             SELECT r.*, b.name as business_name, b.type as business_type,
                    b.location, b.tone, b.owner_name, b.id as business_id,
-                   b.auto_approve_high, b.banned_phrases, b.signoff_library, b.brand_facts
+                   b.auto_approve_high, b.banned_phrases, b.signoff_library, b.brand_facts,
+                   b.brand_hours, b.brand_services, b.brand_geo, b.brand_usp, b.allowed_phrases,
+                   b.auto_rule_1_2, b.auto_rule_3, b.auto_rule_4_5, b.quiet_hours, b.sla_hours_neg
             FROM reviews r JOIN businesses b ON r.business_id = b.id
             WHERE r.id = ? AND b.user_id = ?
         """, (review_id, account_id)).fetchone()
@@ -871,6 +873,16 @@ async def update_business(
     banned_phrases: str = Form(""),
     signoff_library: str = Form(""),
     brand_facts: str = Form(""),
+    brand_hours: str = Form(""),
+    brand_services: str = Form(""),
+    brand_geo: str = Form(""),
+    brand_usp: str = Form(""),
+    allowed_phrases: str = Form(""),
+    auto_rule_1_2: str = Form("draft"),
+    auto_rule_3: str = Form("draft"),
+    auto_rule_4_5: str = Form("approve"),
+    quiet_hours: str = Form(""),
+    sla_hours_neg: int = Form(24),
 ):
     user, account_id, role = get_account_context(request)
     if not user:
@@ -881,9 +893,13 @@ async def update_business(
     from app.database import db_connection
     with db_connection() as conn:
         conn.execute(
-            """UPDATE businesses SET name=?, type=?, location=?, tone=?, owner_name=?, auto_approve_high=?, banned_phrases=?, signoff_library=?, brand_facts=?
+            """UPDATE businesses SET name=?, type=?, location=?, tone=?, owner_name=?, auto_approve_high=?, banned_phrases=?, signoff_library=?, brand_facts=?,
+               brand_hours=?, brand_services=?, brand_geo=?, brand_usp=?, allowed_phrases=?,
+               auto_rule_1_2=?, auto_rule_3=?, auto_rule_4_5=?, quiet_hours=?, sla_hours_neg=?
                WHERE id=? AND user_id=?""",
-            (name, business_type, location, tone, owner_name, int(auto_approve_high), banned_phrases, signoff_library, brand_facts, business_id, account_id)
+            (name, business_type, location, tone, owner_name, int(auto_approve_high), banned_phrases, signoff_library, brand_facts,
+             brand_hours, brand_services, brand_geo, brand_usp, allowed_phrases,
+             auto_rule_1_2, auto_rule_3, auto_rule_4_5, quiet_hours, int(sla_hours_neg), business_id, account_id)
         )
     add_audit(account_id, user["id"], "business.update", "business", business_id, "")
     return RedirectResponse("/settings", status_code=302)

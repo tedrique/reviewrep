@@ -59,6 +59,16 @@ def init_db():
                 banned_phrases TEXT DEFAULT '',
                 signoff_library TEXT DEFAULT '',
                 brand_facts TEXT DEFAULT '',
+                brand_hours TEXT DEFAULT '',
+                brand_services TEXT DEFAULT '',
+                brand_geo TEXT DEFAULT '',
+                brand_usp TEXT DEFAULT '',
+                allowed_phrases TEXT DEFAULT '',
+                auto_rule_1_2 TEXT DEFAULT 'draft',
+                auto_rule_3 TEXT DEFAULT 'draft',
+                auto_rule_4_5 TEXT DEFAULT 'approve',
+                quiet_hours TEXT DEFAULT '',
+                sla_hours_neg INTEGER DEFAULT 24,
                 created_at TEXT DEFAULT (datetime('now'))
             );
 
@@ -80,6 +90,7 @@ def init_db():
                 edited_response TEXT DEFAULT '',
                 status TEXT DEFAULT 'pending',
                 published_at TEXT DEFAULT '',
+                missing_fact INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now'))
             );
 
@@ -248,6 +259,17 @@ def save_response(review_id: int, ai_response: str) -> int:
             return existing["id"]
         cursor = conn.execute("INSERT INTO responses (review_id, ai_response, status) VALUES (?, ?, 'pending')",
                               (review_id, ai_response))
+        return cursor.lastrowid
+
+def save_response_with_flags(review_id: int, ai_response: str, missing_fact: int = 0) -> int:
+    with db_connection() as conn:
+        existing = conn.execute("SELECT id FROM responses WHERE review_id = ?", (review_id,)).fetchone()
+        if existing:
+            conn.execute("UPDATE responses SET ai_response = ?, status = 'pending', missing_fact=?, created_at = datetime('now') WHERE id = ?",
+                         (ai_response, missing_fact, existing["id"]))
+            return existing["id"]
+        cursor = conn.execute("INSERT INTO responses (review_id, ai_response, status, missing_fact) VALUES (?, ?, 'pending', ?)",
+                              (review_id, ai_response, missing_fact))
         return cursor.lastrowid
 
 

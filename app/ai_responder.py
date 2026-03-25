@@ -36,6 +36,11 @@ def generate_response(
     banned_phrases: str = "",
     signoff_library: str = "",
     brand_facts: str = "",
+    brand_hours: str = "",
+    brand_services: str = "",
+    brand_geo: str = "",
+    brand_usp: str = "",
+    allowed_phrases: str = "",
 ) -> str:
     """Generate an AI response to a review using Claude."""
 
@@ -56,6 +61,16 @@ def generate_response(
         system += f"\nPick a natural sign-off from: {signoff_library}"
     if brand_facts:
         system += f"\nBrand facts to weave in when relevant: {brand_facts}"
+    if brand_hours:
+        system += f"\nHours: {brand_hours}"
+    if brand_services:
+        system += f"\nServices: {brand_services}"
+    if brand_geo:
+        system += f"\nLocation specifics: {brand_geo}"
+    if brand_usp:
+        system += f"\nUnique selling point: {brand_usp}"
+    if allowed_phrases:
+        system += f"\nPrefer these phrases when natural: {allowed_phrases}"
 
     user_msg = f"""Review by {author} ({rating} star{'s' if rating != 1 else ''}):
 "{review_text}"

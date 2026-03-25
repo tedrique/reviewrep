@@ -44,6 +44,42 @@
                 <input type="checkbox" name="auto_approve_high" value="1" {% if biz.auto_approve_high %}checked{% endif %} class="h-4 w-4 text-blue-600 border-gray-300 rounded">
                 <label class="text-sm text-gray-700">Auto-approve 4–5★ replies</label>
             </div>
+            <div class="grid md:grid-cols-3 gap-3">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Rule 1–2★</label>
+                    <select name="auto_rule_1_2" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                        {% for val,label in [('draft','Draft'),('approve','Needs approve'),('publish','Publish')] %}
+                        <option value="{{ val }}" {% if biz.auto_rule_1_2==val %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Rule 3★</label>
+                    <select name="auto_rule_3" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                        {% for val,label in [('draft','Draft'),('approve','Needs approve'),('publish','Publish')] %}
+                        <option value="{{ val }}" {% if biz.auto_rule_3==val %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Rule 4–5★</label>
+                    <select name="auto_rule_4_5" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                        {% for val,label in [('approve','Needs approve'),('publish','Publish')] %}
+                        <option value="{{ val }}" {% if biz.auto_rule_4_5==val %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="grid md:grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Quiet hours (HH:MM-HH:MM)</label>
+                    <input type="text" name="quiet_hours" value="{{ biz.quiet_hours or '' }}" placeholder="22:00-07:00" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">SLA for 1–2★ (hours)</label>
+                    <input type="number" name="sla_hours_neg" value="{{ biz.sla_hours_neg or 24 }}" min="1" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                </div>
+            </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Banned phrases (one per line)</label>
                 <textarea name="banned_phrases" rows="2" class="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm">{{ biz.banned_phrases or '' }}</textarea>
@@ -55,6 +91,30 @@
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Brand facts (paste bullets)</label>
                 <textarea name="brand_facts" rows="3" class="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm" placeholder="Open 7 days, vegan options, parking on site">{{ biz.brand_facts or '' }}</textarea>
+            </div>
+            <div class="grid md:grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Hours</label>
+                    <textarea name="brand_hours" rows="2" class="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm" placeholder="Mon-Fri 8-18; Sat 9-15">{{ biz.brand_hours or '' }}</textarea>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Services</label>
+                    <textarea name="brand_services" rows="2" class="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm" placeholder="Haircut, coloring, beard trim">{{ biz.brand_services or '' }}</textarea>
+                </div>
+            </div>
+            <div class="grid md:grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Geo specifics</label>
+                    <textarea name="brand_geo" rows="2" class="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm" placeholder="Near Canterbury West station, parking onsite">{{ biz.brand_geo or '' }}</textarea>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Unique selling point</label>
+                    <textarea name="brand_usp" rows="2" class="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm" placeholder="Award-winning sourdough pizza">{{ biz.brand_usp or '' }}</textarea>
+                </div>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Allowed phrases (one per line)</label>
+                <textarea name="allowed_phrases" rows="2" class="w-full border border-gray-300 rounded-lg px-4 py-2 text-sm" placeholder="Family-run since 1998">{{ biz.allowed_phrases or '' }}</textarea>
             </div>
             <button type="submit" class="bg-gray-900 text-white px-6 py-2 rounded-lg hover:bg-gray-800">
                 Save Changes
