@@ -54,6 +54,14 @@
             {% endif %}
         </div>
     </nav>
+    {% if user and user.subscription_status == 'trial' and user.trial_ends_at %}
+    {% set trial_end = user.trial_ends_at[:10] %}
+    <div class="bg-amber-50 border-b border-amber-200 text-center py-2 px-4 text-sm text-amber-800">
+        Free trial ends <strong>{{ trial_end }}</strong> —
+        <a href="/pricing" class="font-semibold text-amber-900 underline hover:text-amber-700">Upgrade now</a>
+        to keep your AI responses running.
+    </div>
+    {% endif %}
     <main>
         {% block content %}{% endblock %}
     </main>

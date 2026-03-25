@@ -549,6 +549,19 @@ async def generate_ai_response(request: Request, review_id: int, background_task
         return RedirectResponse("/login", status_code=302)
     verify_csrf(request, csrf_token)
 
+    # Check subscription / trial
+    from datetime import datetime as dt
+    sub_status = user.get("subscription_status", "trial")
+    if sub_status == "trial" and user.get("trial_ends_at"):
+        try:
+            trial_end = dt.fromisoformat(user["trial_ends_at"])
+            if dt.utcnow() > trial_end:
+                return RedirectResponse("/pricing?expired=1", status_code=302)
+        except Exception:
+            pass
+    elif sub_status not in ("trial", "active"):
+        return RedirectResponse("/pricing?expired=1", status_code=302)
+
     from app.database import db_connection
     with db_connection() as conn:
         review = conn.execute("""

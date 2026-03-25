@@ -121,7 +121,8 @@ def init_db():
 # --- Helper queries ---
 
 def create_user(email: str, name: str, google_id: str, access_token: str = "", refresh_token: str = "") -> int:
-    trial_end = datetime.utcnow().isoformat()
+    from datetime import timedelta
+    trial_end = (datetime.utcnow() + timedelta(days=7)).isoformat()
     with db_connection() as conn:
         # Check by email first (covers demo re-login)
         existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
