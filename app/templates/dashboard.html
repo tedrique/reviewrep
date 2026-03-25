@@ -145,18 +145,29 @@
     </div>
 
     <div class="bg-white rounded-xl border border-gray-200 p-3 md:p-4 mb-6 flex flex-wrap items-center gap-2 md:gap-3 text-sm">
-        <span class="text-gray-500 mr-1">Quick filters:</span>
-        <button type="button" data-filter="all" class="filter-btn bg-gray-900 text-white px-3 py-1.5 rounded-lg">All</button>
-        <button type="button" data-filter="pending" class="filter-btn bg-gray-100 text-gray-700 px-3 py-1.5 rounded-lg">Pending</button>
-        <button type="button" data-filter="no-response" class="filter-btn bg-gray-100 text-gray-700 px-3 py-1.5 rounded-lg">No AI draft</button>
-        <button type="button" data-filter="approved" class="filter-btn bg-gray-100 text-gray-700 px-3 py-1.5 rounded-lg">Approved</button>
-        <button type="button" data-filter="neg" class="filter-btn bg-rose-50 text-rose-700 px-3 py-1.5 rounded-lg">1–2★</button>
-        <button type="button" data-filter="mid" class="filter-btn bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg">3★</button>
-        <button type="button" data-filter="pos" class="filter-btn bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-lg">4–5★</button>
+        <form method="GET" action="/dashboard" class="flex flex-wrap items-center gap-2 md:gap-3 flex-1">
+            <input type="hidden" name="business_id" value="{{ current_business.id }}">
+            <span class="text-gray-500 mr-1">Filter:</span>
+            <select name="status" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="all" {% if status_filter=='all' %}selected{% endif %}>All</option>
+                <option value="pending" {% if status_filter=='pending' %}selected{% endif %}>Pending</option>
+                <option value="approved" {% if status_filter=='approved' %}selected{% endif %}>Approved</option>
+            </select>
+            <select name="rating" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="all" {% if rating_filter=='all' %}selected{% endif %}>Any rating</option>
+                <option value="neg" {% if rating_filter=='neg' %}selected{% endif %}>1–2★</option>
+                <option value="mid" {% if rating_filter=='mid' %}selected{% endif %}>3★</option>
+                <option value="pos" {% if rating_filter=='pos' %}selected{% endif %}>4–5★</option>
+            </select>
+            <input type="search" name="q" value="{{ search }}" placeholder="Search text or author"
+                   class="flex-1 min-w-[160px] border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <button type="submit" class="bg-gray-900 text-white px-4 py-2 rounded-lg text-sm">Apply</button>
+        </form>
         {% if reviews %}
         <form method="POST" action="/review/{{ reviews[0].id }}/generate-all" class="ml-auto">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-blue-700">
-                Generate All Responses
+                Generate All
             </button>
         </form>
         {% endif %}
@@ -198,10 +209,7 @@
             {% endif %}
 
             {% for review in reviews %}
-            <div class="bg-white p-6 rounded-xl border border-gray-200 review-card"
-                 data-rating="{{ review.rating }}"
-                 data-status="{{ review.response_status or 'none' }}"
-                 data-has-response="{{ 'yes' if review.ai_response else 'no' }}">
+            <div class="bg-white p-6 rounded-xl border border-gray-200">
                 <!-- Review header -->
                 <div class="flex justify-between items-start mb-3">
                     <div>
@@ -265,53 +273,13 @@
     <div>Page {{ page }} of {{ total_pages }}</div>
     <div class="flex gap-2">
         {% if page > 1 %}
-        <a href="/dashboard?business_id={{ current_business.id }}&page={{ page - 1 }}" class="px-3 py-1.5 border border-gray-200 rounded-lg">Prev</a>
+        <a href="/dashboard?business_id={{ current_business.id }}&page={{ page - 1 }}&status={{ status_filter }}&rating={{ rating_filter }}&q={{ search }}" class="px-3 py-1.5 border border-gray-200 rounded-lg">Prev</a>
         {% endif %}
         {% if page < total_pages %}
-        <a href="/dashboard?business_id={{ current_business.id }}&page={{ page + 1 }}" class="px-3 py-1.5 border border-gray-200 rounded-lg">Next</a>
+        <a href="/dashboard?business_id={{ current_business.id }}&page={{ page + 1 }}&status={{ status_filter }}&rating={{ rating_filter }}&q={{ search }}" class="px-3 py-1.5 border border-gray-200 rounded-lg">Next</a>
         {% endif %}
     </div>
 </div>
 {% endif %}
 
-<script>
-document.addEventListener("DOMContentLoaded", () => {
-    const buttons = document.querySelectorAll(".filter-btn");
-    const cards = document.querySelectorAll(".review-card");
-
-    function setActive(btn) {
-        buttons.forEach(b => b.classList.remove("bg-gray-900", "text-white", "ring-2", "ring-gray-800"));
-        btn.classList.add("bg-gray-900", "text-white", "ring-2", "ring-gray-800");
-    }
-
-    function applyFilter(filter) {
-        cards.forEach(card => {
-            const rating = parseInt(card.dataset.rating, 10);
-            const status = card.dataset.status;
-            const hasResponse = card.dataset.hasResponse === "yes";
-            let show = true;
-            if (filter === "pending") show = status !== "approved";
-            if (filter === "approved") show = status === "approved";
-            if (filter === "no-response") show = !hasResponse;
-            if (filter === "neg") show = rating <= 2;
-            if (filter === "mid") show = rating === 3;
-            if (filter === "pos") show = rating >= 4;
-            card.classList.toggle("hidden", !show);
-        });
-    }
-
-    buttons.forEach(btn => {
-        btn.addEventListener("click", () => {
-            setActive(btn);
-            applyFilter(btn.dataset.filter);
-        });
-    });
-
-    // Default state
-    if (buttons.length) {
-        setActive(buttons[0]);
-        applyFilter(buttons[0].dataset.filter);
-    }
-});
-</script>
 {% endblock %}

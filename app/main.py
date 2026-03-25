@@ -14,9 +14,12 @@ from app.database import (
     create_business, add_review, save_response, approve_response,
     get_notification_prefs, save_notification_pref,
     get_team_members, create_team_invite, attach_member_user, remove_team_member,
+    add_audit,
 )
 from app.ai_responder import generate_response
 from app.notifications import send_notifications
+from app.task_queue import enqueue as task_enqueue, get_dead_letters
+from app.rate_limit import check_rate_limit
 
 app = FastAPI(title="ReviewReply AI", docs_url="/docs" if DEBUG else None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -280,6 +283,9 @@ async def dashboard(request: Request):
     reviews = []
     page = int(request.query_params.get("page", 1))
     per_page = 20
+    status_filter = request.query_params.get("status")
+    rating_filter = request.query_params.get("rating")
+    search = request.query_params.get("q", "").strip() or None
 
     business_id = request.query_params.get("business_id")
     if businesses:
@@ -289,7 +295,14 @@ async def dashboard(request: Request):
             current_business = businesses[0]
         total = count_reviews(current_business["id"])
         offset = (page - 1) * per_page
-        reviews = get_reviews(current_business["id"], limit=per_page, offset=offset)
+        reviews = get_reviews(
+            current_business["id"],
+            limit=per_page,
+            offset=offset,
+            status=status_filter,
+            rating_filter=rating_filter,
+            search=search,
+        )
         total_pages = max(1, (total + per_page - 1) // per_page)
         # Insights
         from app.database import db_connection
@@ -333,6 +346,9 @@ async def dashboard(request: Request):
         "approved_reviews": approved,
         "published_reviews": published,
         "avg_ttr": avg_ttr,
+        "status_filter": status_filter or "all",
+        "rating_filter": rating_filter or "all",
+        "search": search or "",
     })
 
 
@@ -353,7 +369,8 @@ async def add_business(
     if role == "staff":
         raise HTTPException(status_code=403, detail="Staff cannot add businesses")
     verify_csrf(request, csrf_token)
-    create_business(account_id, name, business_type, location, tone)
+    biz_id = create_business(account_id, name, business_type, location, tone)
+    add_audit(account_id, user["id"], "business.add", "business", biz_id, name)
     return RedirectResponse("/dashboard", status_code=302)
 
 
@@ -378,8 +395,9 @@ async def add_review_manual(
         if not biz:
             raise HTTPException(status_code=403)
     verify_csrf(request, csrf_token)
-    add_review(business_id, author, rating, text)
-    background_tasks.add_task(send_notifications, account_id, "new_review", {
+    new_id = add_review(business_id, author, rating, text)
+    add_audit(account_id, user["id"], "review.add", "review", new_id, f"rating={rating}")
+    task_enqueue(send_notifications, account_id, "new_review", {
         "business_name": biz["name"],
         "author": author,
         "rating": rating,
@@ -433,7 +451,8 @@ async def sync_reviews(request: Request, business_id: int, background_tasks: Bac
             add_review(business_id, rev["author"], rev["rating"], rev["text"],
                        google_review_id=rev["google_review_id"], review_time=rev["time"])
             imported += 1
-            background_tasks.add_task(send_notifications, account_id, "new_review", {
+            add_audit(account_id, user["id"], "review.sync", "review", None, f"rating={rev['rating']}")
+            task_enqueue(send_notifications, account_id, "new_review", {
                 "business_name": biz["name"],
                 "author": rev["author"],
                 "rating": rev["rating"],
@@ -450,6 +469,9 @@ async def publish_response(request: Request, response_id: int, csrf_token: str =
     if not user:
         return RedirectResponse("/login", status_code=302)
     verify_csrf(request, csrf_token)
+
+    if not check_rate_limit(f"publish:{user['id']}", max_requests=20, window_seconds=60):
+        return RedirectResponse("/dashboard?error=rate_limit", status_code=302)
 
     from app.database import db_connection
     with db_connection() as conn:
@@ -480,6 +502,7 @@ async def publish_response(request: Request, response_id: int, csrf_token: str =
     if success:
         with db_connection() as conn:
             conn.execute("UPDATE responses SET status='published' WHERE id=?", (response_id,))
+        add_audit(account_id, user["id"], "response.publish", "response", response_id, "")
 
     return RedirectResponse(f"/dashboard?business_id={row['business_id']}", status_code=302)
 
@@ -549,6 +572,10 @@ async def generate_ai_response(request: Request, review_id: int, background_task
         return RedirectResponse("/login", status_code=302)
     verify_csrf(request, csrf_token)
 
+    # Rate limit: 10 generates per minute per user
+    if not check_rate_limit(f"generate:{user['id']}", max_requests=10, window_seconds=60):
+        return RedirectResponse("/dashboard?error=rate_limit", status_code=302)
+
     # Check subscription / trial
     from datetime import datetime as dt
     sub_status = user.get("subscription_status", "trial")
@@ -591,15 +618,17 @@ async def generate_ai_response(request: Request, review_id: int, background_task
     )
 
     response_id = save_response(review_id, ai_response)
+    add_audit(account_id, user["id"], "response.generate", "review", review_id, f"rating={review['rating']}")
     if review["auto_approve_high"] and review["rating"] >= 4:
         approve_response(response_id, ai_response)
-        background_tasks.add_task(send_notifications, account_id, "approved", {
+        task_enqueue(send_notifications, account_id, "approved", {
             "business_name": review["business_name"],
             "rating": review["rating"],
             "author": review["author"],
         })
+        add_audit(account_id, user["id"], "response.auto_approve", "response", response_id, "")
     else:
-        background_tasks.add_task(send_notifications, account_id, "draft_ready", {
+        task_enqueue(send_notifications, account_id, "draft_ready", {
             "business_name": review["business_name"],
             "rating": review["rating"],
             "author": review["author"],
@@ -653,13 +682,14 @@ async def generate_all_responses(request: Request, review_id: int, background_ta
             resp_id = save_response(rev["id"], ai_response)
             if rev["auto_approve_high"] and rev["rating"] >= 4:
                 approve_response(resp_id, ai_response)
-                background_tasks.add_task(send_notifications, account_id, "approved", {
+                task_enqueue(send_notifications, account_id, "approved", {
                     "business_name": rev["business_name"],
                     "rating": rev["rating"],
                     "author": rev["author"],
                 })
-        except Exception:
-            continue
+                add_audit(account_id, user["id"], "response.auto_approve", "response", resp_id, "")
+            except Exception:
+                continue
 
     return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
 
@@ -674,6 +704,7 @@ async def approve(request: Request, response_id: int, background_tasks: Backgrou
     verify_csrf(request, form.get("csrf_token", ""))
     edited = form.get("edited_response", "")
     approve_response(response_id, edited)
+    add_audit(account_id, user["id"], "response.approve", "response", response_id, "")
 
     # Check if this is the first ever approve (onboarding) → show welcome
     from app.database import db_connection
@@ -695,7 +726,7 @@ async def approve(request: Request, response_id: int, background_tasks: Backgrou
         """, (response_id, account_id)).fetchone()
     business_id = row["business_id"] if row else ""
 
-    background_tasks.add_task(send_notifications, account_id, "approved", {
+    task_enqueue(send_notifications, account_id, "approved", {
         "business_id": business_id,
     })
 
@@ -744,6 +775,7 @@ async def update_business(
                WHERE id=? AND user_id=?""",
             (name, business_type, location, tone, owner_name, int(auto_approve_high), banned_phrases, signoff_library, brand_facts, business_id, account_id)
         )
+    add_audit(account_id, user["id"], "business.update", "business", business_id, "")
     return RedirectResponse("/settings", status_code=302)
 
 
@@ -769,6 +801,7 @@ async def update_notifications(request: Request):
     if telegram_target:
         save_notification_pref(account_id, "telegram", telegram_target, events_str)
 
+    add_audit(account_id, user["id"], "notifications.update", "account", account_id, "")
     return RedirectResponse("/settings", status_code=302)
 
 
@@ -936,6 +969,7 @@ async def team_invite(request: Request, email: str = Form(...), role: str = Form
         send_email(email, f"You're invited to ReviewReply AI ({role})", f"<p>{user['email']} invited you to collaborate on review replies.</p><p>Sign up with this email to join.</p>")
     except Exception:
         pass
+    add_audit(account_id, user["id"], "team.invite", "user", None, email)
     return RedirectResponse("/team", status_code=302)
 
 
@@ -947,6 +981,7 @@ async def team_remove(request: Request, member_id: int):
     form = await request.form()
     verify_csrf(request, form.get("csrf_token", ""))
     remove_team_member(account_id, member_id)
+    add_audit(account_id, user["id"], "team.remove", "membership", member_id, "")
     return RedirectResponse("/team", status_code=302)
 
 
@@ -1017,6 +1052,12 @@ async def admin_panel(request: Request):
         tickets = [dict(r) for r in conn.execute("SELECT * FROM support_tickets ORDER BY created_at DESC LIMIT 20").fetchall()]
         users_list = [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()]
 
+        # Audit log
+        audit_log = [dict(r) for r in conn.execute("SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 50").fetchall()]
+
+    # Dead letter queue
+    dead_letters = get_dead_letters()
+
     stats = {
         "total_users": total_users, "active_trials": active_trials,
         "paying_customers": paying, "mrr": mrr,
@@ -1027,4 +1068,5 @@ async def admin_panel(request: Request):
 
     return templates.TemplateResponse(request=request, name="admin.html", context={
         "user": user, "stats": stats, "tickets": tickets, "users": users_list,
+        "audit_log": audit_log, "dead_letters": dead_letters,
     })

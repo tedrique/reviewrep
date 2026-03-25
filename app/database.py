@@ -103,6 +103,19 @@ def init_db():
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                target_type TEXT DEFAULT '',
+                target_id INTEGER,
+                meta TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_audit_account ON audit_log(account_id);
         """)
 
         # Backfill new columns for existing databases
@@ -182,16 +195,37 @@ def add_review(business_id: int, author: str, rating: int, text: str, google_rev
         return cursor.lastrowid
 
 
-def get_reviews(business_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
+def get_reviews(
+    business_id: int,
+    limit: int = 50,
+    offset: int = 0,
+    status: str | None = None,
+    rating_filter: str | None = None,
+    search: str | None = None,
+) -> list[dict]:
+    sql = """
+        SELECT r.*, resp.ai_response, resp.edited_response, resp.status as response_status, resp.id as response_id
+        FROM reviews r
+        LEFT JOIN responses resp ON resp.review_id = r.id
+        WHERE r.business_id = :biz
+    """
+    params = {"biz": business_id, "limit": limit, "offset": offset}
+    if status == "pending":
+        sql += " AND (resp.status IS NULL OR resp.status != 'approved')"
+    elif status == "approved":
+        sql += " AND resp.status = 'approved'"
+    if rating_filter == "neg":
+        sql += " AND r.rating <= 2"
+    elif rating_filter == "mid":
+        sql += " AND r.rating = 3"
+    elif rating_filter == "pos":
+        sql += " AND r.rating >= 4"
+    if search:
+        sql += " AND (r.text LIKE :q OR r.author LIKE :q)"
+        params["q"] = f"%{search}%"
+    sql += " ORDER BY r.created_at DESC LIMIT :limit OFFSET :offset"
     with db_connection() as conn:
-        rows = conn.execute("""
-            SELECT r.*, resp.ai_response, resp.edited_response, resp.status as response_status, resp.id as response_id
-            FROM reviews r
-            LEFT JOIN responses resp ON resp.review_id = r.id
-            WHERE r.business_id = ?
-            ORDER BY r.created_at DESC
-            LIMIT ? OFFSET ?
-        """, (business_id, limit, offset)).fetchall()
+        rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -211,6 +245,16 @@ def count_reviews(business_id: int) -> int:
     with db_connection() as conn:
         row = conn.execute("SELECT COUNT(*) as c FROM reviews WHERE business_id = ?", (business_id,)).fetchone()
         return row["c"] if row else 0
+
+
+# --- Audit log ---
+
+def add_audit(account_id: int, user_id: int, action: str, target_type: str = "", target_id: int | None = None, meta: str = ""):
+    with db_connection() as conn:
+        conn.execute(
+            "INSERT INTO audit_log (account_id, user_id, action, target_type, target_id, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+            (account_id, user_id, action, target_type, target_id, meta)
+        )
 
 
 def approve_response(response_id: int, edited_text: str = "") -> None:

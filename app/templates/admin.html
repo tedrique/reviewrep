@@ -116,5 +116,60 @@
             </table>
         </div>
     </div>
+
+    <!-- Audit Log -->
+    <div class="bg-white rounded-xl border border-gray-200 mb-8">
+        <div class="px-6 py-4 border-b border-gray-100">
+            <h2 class="font-bold">Audit Log (last 50)</h2>
+        </div>
+        {% if audit_log %}
+        <div class="overflow-x-auto">
+            <table class="w-full text-xs">
+                <thead class="bg-gray-50 text-left">
+                    <tr>
+                        <th class="px-4 py-2 font-semibold text-gray-600">Time</th>
+                        <th class="px-4 py-2 font-semibold text-gray-600">User</th>
+                        <th class="px-4 py-2 font-semibold text-gray-600">Action</th>
+                        <th class="px-4 py-2 font-semibold text-gray-600">Target</th>
+                        <th class="px-4 py-2 font-semibold text-gray-600">Meta</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-50">
+                    {% for a in audit_log %}
+                    <tr>
+                        <td class="px-4 py-2 text-gray-400">{{ a.created_at[:19] }}</td>
+                        <td class="px-4 py-2">{{ a.user_id }}</td>
+                        <td class="px-4 py-2 font-medium">{{ a.action }}</td>
+                        <td class="px-4 py-2 text-gray-500">{{ a.target_type }} #{{ a.target_id or '' }}</td>
+                        <td class="px-4 py-2 text-gray-400">{{ a.meta[:100] }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="px-6 py-6 text-center text-gray-400 text-sm">No audit entries yet.</div>
+        {% endif %}
+    </div>
+
+    <!-- Failed Tasks (Dead Letter Queue) -->
+    {% if dead_letters %}
+    <div class="bg-red-50 rounded-xl border border-red-200 mb-8">
+        <div class="px-6 py-4 border-b border-red-100">
+            <h2 class="font-bold text-red-800">Failed Tasks ({{ dead_letters|length }})</h2>
+        </div>
+        <div class="divide-y divide-red-100">
+            {% for dl in dead_letters %}
+            <div class="px-6 py-3">
+                <div class="flex justify-between text-xs">
+                    <span class="font-medium text-red-700">{{ dl.task }}</span>
+                    <span class="text-red-400">{{ dl.timestamp }}</span>
+                </div>
+                <p class="text-xs text-red-600 mt-1">{{ dl.error }}</p>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
 </div>
 {% endblock %}

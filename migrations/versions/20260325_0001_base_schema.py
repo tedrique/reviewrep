@@ -95,10 +95,25 @@ def upgrade():
     )
     op.create_index("idx_team_account", "team_memberships", ["account_id"])
 
+    op.create_table(
+        "audit_log",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("account_id", sa.Integer, nullable=False),
+        sa.Column("user_id", sa.Integer, nullable=False),
+        sa.Column("action", sa.Text, nullable=False),
+        sa.Column("target_type", sa.Text, server_default=""),
+        sa.Column("target_id", sa.Integer),
+        sa.Column("meta", sa.Text, server_default=""),
+        sa.Column("created_at", sa.Text, server_default="(datetime('now'))"),
+    )
+    op.create_index("idx_audit_account", "audit_log", ["account_id"])
+
 
 def downgrade():
     op.drop_index("idx_team_account", table_name="team_memberships")
     op.drop_table("team_memberships")
+    op.drop_index("idx_audit_account", table_name="audit_log")
+    op.drop_table("audit_log")
     op.drop_table("notification_prefs")
     op.drop_index("idx_responses_review_id", table_name="responses")
     op.drop_table("responses")
