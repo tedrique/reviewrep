@@ -131,7 +131,7 @@
                     <p class="text-sm text-gray-700">{{ review.edited_response or review.ai_response }}</p>
                     {% else %}
                     <form method="POST" action="/response/{{ review.response_id }}/approve">
-                        <textarea name="edited_response" class="w-full border border-blue-200 rounded-lg px-3 py-2 text-sm mb-2 h-20 resize-none">{{ review.ai_response }}</textarea>
+                        <textarea name="edited_response" class="w-full border border-blue-200 rounded-lg px-4 py-3 text-sm mb-3 min-h-[120px] resize-y leading-relaxed">{{ review.ai_response }}</textarea>
                         <div class="flex gap-2">
                             <button type="submit" class="bg-green-600 text-white px-4 py-1.5 rounded-lg text-sm hover:bg-green-700">
                                 Approve & Publish
