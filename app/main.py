@@ -160,9 +160,14 @@ async def billing_webhook(request: Request):
     return {"status": "ok"}
 
 
-# --- Demo login (for MVP testing without Google OAuth) ---
+# --- Admin backdoor login (hidden, not linked anywhere) ---
 
-@app.post("/demo-login")
+@app.get("/admin-login", response_class=HTMLResponse)
+async def admin_login_page(request: Request):
+    return templates.TemplateResponse(request=request, name="admin_login.html")
+
+
+@app.post("/admin-login")
 async def demo_login(request: Request, email: str = Form(...), name: str = Form(...)):
     from app.database import create_user, db_connection
 

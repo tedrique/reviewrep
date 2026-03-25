@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Admin Login{% endblock %}
+{% block content %}
+<div class="max-w-sm mx-auto mt-20 px-4">
+    <div class="bg-white p-6 rounded-xl border border-gray-200">
+        <h1 class="font-bold mb-4">Admin Login</h1>
+        <form method="POST" action="/admin-login" class="space-y-3">
+            <input type="text" name="name" required placeholder="Name" class="w-full border rounded-lg px-3 py-2 text-sm">
+            <input type="email" name="email" required placeholder="Email" class="w-full border rounded-lg px-3 py-2 text-sm">
+            <button type="submit" class="w-full bg-gray-900 text-white py-2 rounded-lg text-sm">Login</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
