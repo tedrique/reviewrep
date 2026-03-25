@@ -1,17 +1,41 @@
-"""Simple in-memory rate limiter. Replace with Redis for multi-instance."""
+"""Simple in-memory rate limiting.
+
+Defaults:
+- generate: 10/min per user
+- publish: 20/min per user
+
+For production, swap storage to Redis and keep the same interface.
+"""
 import time
-from collections import defaultdict
-
-_buckets: dict[str, list[float]] = defaultdict(list)
+from collections import defaultdict, deque
 
 
-def check_rate_limit(key: str, max_requests: int = 10, window_seconds: int = 60) -> bool:
-    """Returns True if request is allowed, False if rate-limited."""
-    now = time.time()
-    bucket = _buckets[key]
-    # Remove expired entries
-    _buckets[key] = [t for t in bucket if now - t < window_seconds]
-    if len(_buckets[key]) >= max_requests:
-        return False
-    _buckets[key].append(now)
-    return True
+class RateLimiter:
+    def __init__(self, limit: int, window: int):
+        self.limit = limit
+        self.window = window
+        self.buckets: dict[int, deque[float]] = defaultdict(deque)
+
+    def allow(self, key: int) -> bool:
+        now = time.time()
+        bucket = self.buckets[key]
+        # drop old timestamps
+        while bucket and now - bucket[0] > self.window:
+            bucket.popleft()
+        if len(bucket) >= self.limit:
+            return False
+        bucket.append(now)
+        return True
+
+
+generate_limiter = RateLimiter(limit=10, window=60)
+publish_limiter = RateLimiter(limit=20, window=60)
+
+
+def check_generate(user_id: int) -> bool:
+    return generate_limiter.allow(user_id)
+
+
+def check_publish(user_id: int) -> bool:
+    return publish_limiter.allow(user_id)
+

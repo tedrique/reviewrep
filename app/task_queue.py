@@ -1,64 +1,32 @@
-"""Lightweight async task queue with retries and timeouts.
-Replaces simple run_async. For scale, swap to Celery/RQ/Arq."""
-import asyncio
-import logging
+"""Lightweight task queue with retries and dead-letter logging.
+
+This is in-process and thread-based for simplicity. Swap the backend for
+Celery/RQ/Arq by keeping the `enqueue` signature.
+"""
+from typing import Callable
+import threading
 import traceback
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import datetime
+import json
+import time
 
-log = logging.getLogger(__name__)
-_executor = ThreadPoolExecutor(max_workers=3)
-_dead_letter: list[dict] = []
+from app.database import log_dead_letter
 
 
-@dataclass
-class TaskResult:
-    task_name: str
-    success: bool
-    attempts: int
-    error: str = ""
-    completed_at: str = ""
+def _run_with_retries(fn: Callable, args, kwargs, attempts: int, task_name: str):
+    for i in range(attempts):
+        try:
+            fn(*args, **kwargs)
+            return
+        except Exception as e:
+            if i == attempts - 1:
+                payload = json.dumps({"args": args, "kwargs": kwargs}, default=str)[:2000]
+                log_dead_letter(task_name, payload, f"{e}\n{traceback.format_exc()}")
+            else:
+                time.sleep(1.5)
 
 
-def enqueue(func, *args, max_retries: int = 3, timeout: float = 30.0, task_name: str = "", **kwargs):
-    """Run a sync function in background thread with retries and timeout."""
-    name = task_name or func.__name__
-
-    def _run():
-        last_error = ""
-        for attempt in range(1, max_retries + 1):
-            try:
-                func(*args, **kwargs)
-                log.info(f"[TASK OK] {name} (attempt {attempt})")
-                return
-            except Exception as e:
-                last_error = f"{e}"
-                log.warning(f"[TASK RETRY] {name} attempt {attempt}/{max_retries}: {e}")
-                if attempt < max_retries:
-                    import time
-                    time.sleep(min(2 ** attempt, 10))
-
-        # All retries failed — dead letter
-        entry = {
-            "task": name,
-            "error": last_error,
-            "attempts": max_retries,
-            "timestamp": datetime.utcnow().isoformat(),
-            "traceback": traceback.format_exc(),
-        }
-        _dead_letter.append(entry)
-        if len(_dead_letter) > 100:
-            _dead_letter.pop(0)
-        log.error(f"[TASK DEAD] {name} failed after {max_retries} attempts: {last_error}")
-
-    _executor.submit(_run)
-
-
-def get_dead_letters() -> list[dict]:
-    """Get failed tasks for admin inspection."""
-    return list(_dead_letter)
-
-
-def clear_dead_letters():
-    _dead_letter.clear()
+def enqueue(fn: Callable, *args, attempts: int = 3, task_name: str = ""):
+    name = task_name or fn.__name__
+    t = threading.Thread(target=_run_with_retries, args=(fn, args, {}, attempts, name), daemon=True)
+    t.start()
+    return t

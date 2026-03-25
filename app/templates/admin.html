@@ -153,23 +153,27 @@
     </div>
 
     <!-- Failed Tasks (Dead Letter Queue) -->
-    {% if dead_letters %}
     <div class="bg-red-50 rounded-xl border border-red-200 mb-8">
-        <div class="px-6 py-4 border-b border-red-100">
-            <h2 class="font-bold text-red-800">Failed Tasks ({{ dead_letters|length }})</h2>
+        <div class="px-6 py-4 border-b border-red-100 flex items-center justify-between">
+            <h2 class="font-bold text-red-800">Failed Tasks</h2>
+            <span class="text-xs text-red-500">showing last {{ dead_letters|length if dead_letters else 0 }}</span>
         </div>
+        {% if dead_letters %}
         <div class="divide-y divide-red-100">
             {% for dl in dead_letters %}
             <div class="px-6 py-3">
                 <div class="flex justify-between text-xs">
                     <span class="font-medium text-red-700">{{ dl.task }}</span>
-                    <span class="text-red-400">{{ dl.timestamp }}</span>
+                    <span class="text-red-400">{{ dl.created_at }}</span>
                 </div>
                 <p class="text-xs text-red-600 mt-1">{{ dl.error }}</p>
+                <p class="text-[11px] text-gray-500 mt-1 break-all">{{ dl.payload }}</p>
             </div>
             {% endfor %}
         </div>
+        {% else %}
+        <div class="px-6 py-6 text-sm text-red-500">No failed tasks 🎉</div>
+        {% endif %}
     </div>
-    {% endif %}
 </div>
 {% endblock %}

@@ -116,6 +116,14 @@ def init_db():
             );
 
             CREATE INDEX IF NOT EXISTS idx_audit_account ON audit_log(account_id);
+
+            CREATE TABLE IF NOT EXISTS dead_letters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                error TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
         """)
 
         # Backfill new columns for existing databases
@@ -255,6 +263,20 @@ def add_audit(account_id: int, user_id: int, action: str, target_type: str = "",
             "INSERT INTO audit_log (account_id, user_id, action, target_type, target_id, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
             (account_id, user_id, action, target_type, target_id, meta)
         )
+
+
+def log_dead_letter(task: str, payload: str, error: str):
+    with db_connection() as conn:
+        conn.execute(
+            "INSERT INTO dead_letters (task, payload, error, created_at) VALUES (?, ?, ?, datetime('now'))",
+            (task, payload, error[:1000])
+        )
+
+
+def get_dead_letters(limit: int = 50) -> list[dict]:
+    with db_connection() as conn:
+        rows = conn.execute("SELECT * FROM dead_letters ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
 
 
 def approve_response(response_id: int, edited_text: str = "") -> None:

@@ -18,8 +18,9 @@ from app.database import (
 )
 from app.ai_responder import generate_response
 from app.notifications import send_notifications
-from app.task_queue import enqueue as task_enqueue, get_dead_letters
-from app.rate_limit import check_rate_limit
+from app.task_queue import enqueue as task_enqueue
+from app.rate_limit import check_generate, check_publish
+from app.database import get_dead_letters
 
 app = FastAPI(title="ReviewReply AI", docs_url="/docs" if DEBUG else None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -422,7 +423,7 @@ async def sync_reviews(request: Request, business_id: int, background_tasks: Bac
     from app.database import db_connection
     with db_connection() as conn:
         biz = conn.execute("SELECT * FROM businesses WHERE id=? AND user_id=?", (business_id, account_id)).fetchone()
-        if not biz or not biz["google_location_id"]:
+    if not biz or not biz["google_location_id"]:
         return RedirectResponse(f"/dashboard?business_id={business_id}&error=no_location", status_code=302)
     verify_csrf(request, csrf_token)
 
@@ -469,9 +470,8 @@ async def publish_response(request: Request, response_id: int, csrf_token: str =
     if not user:
         return RedirectResponse("/login", status_code=302)
     verify_csrf(request, csrf_token)
-
-    if not check_rate_limit(f"publish:{user['id']}", max_requests=20, window_seconds=60):
-        return RedirectResponse("/dashboard?error=rate_limit", status_code=302)
+    if not check_publish(user["id"]):
+        return HTMLResponse("Rate limit exceeded for publish", status_code=429)
 
     from app.database import db_connection
     with db_connection() as conn:
@@ -571,10 +571,8 @@ async def generate_ai_response(request: Request, review_id: int, background_task
     if not user:
         return RedirectResponse("/login", status_code=302)
     verify_csrf(request, csrf_token)
-
-    # Rate limit: 10 generates per minute per user
-    if not check_rate_limit(f"generate:{user['id']}", max_requests=10, window_seconds=60):
-        return RedirectResponse("/dashboard?error=rate_limit", status_code=302)
+    if not check_generate(user["id"]):
+        return HTMLResponse("Rate limit exceeded for generate", status_code=429)
 
     # Check subscription / trial
     from datetime import datetime as dt
@@ -688,7 +686,7 @@ async def generate_all_responses(request: Request, review_id: int, background_ta
                     "author": rev["author"],
                 })
                 add_audit(account_id, user["id"], "response.auto_approve", "response", resp_id, "")
-            except Exception:
+        except Exception:
                 continue
 
     return RedirectResponse(f"/dashboard?business_id={business_id}", status_code=302)
