@@ -143,6 +143,13 @@ def init_db():
                 text TEXT NOT NULL,
                 created_at TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS review_tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                review_id INTEGER NOT NULL REFERENCES reviews(id),
+                tag TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
         """)
 
         # Backfill new columns for existing databases
@@ -364,6 +371,46 @@ def get_comments_by_review_ids(review_ids: list[int]) -> dict[int, list[dict]]:
         for r in rows:
             grouped.setdefault(r["review_id"], []).append(dict(r))
         return grouped
+
+
+# --- Tags ---
+
+
+def save_tags(review_id: int, tags: list[str]):
+    if tags is None:
+        tags = []
+    with db_connection() as conn:
+        conn.execute("DELETE FROM review_tags WHERE review_id = ?", (review_id,))
+        for t in tags:
+            conn.execute("INSERT INTO review_tags (review_id, tag, created_at) VALUES (?, ?, datetime('now'))", (review_id, t))
+
+
+def get_tags_by_review_ids(review_ids: list[int]) -> dict[int, list[str]]:
+    if not review_ids:
+        return {}
+    placeholders = ",".join("?" for _ in review_ids)
+    sql = f"SELECT review_id, tag FROM review_tags WHERE review_id IN ({placeholders})"
+    with db_connection() as conn:
+        rows = conn.execute(sql, review_ids).fetchall()
+        grouped: dict[int, list[str]] = {}
+        for r in rows:
+            grouped.setdefault(r["review_id"], []).append(r["tag"])
+        return grouped
+
+
+def get_top_tags(business_id: int, limit: int = 5) -> list[dict]:
+    sql = """
+        SELECT rt.tag, COUNT(*) as c
+        FROM review_tags rt
+        JOIN reviews r ON rt.review_id = r.id
+        WHERE r.business_id = ?
+        GROUP BY rt.tag
+        ORDER BY c DESC
+        LIMIT ?
+    """
+    with db_connection() as conn:
+        rows = conn.execute(sql, (business_id, limit)).fetchall()
+        return [dict(r) for r in rows]
 
 
 # --- Notifications ---

@@ -18,6 +18,10 @@ celery_app.conf.update(
             "task": "app.sla.sla_scan_task",
             "schedule": 900.0,
         },
+        "roi-weekly": {
+            "task": "app.roi.weekly_digest",
+            "schedule": 604800.0,  # weekly (BETA)
+        },
     },
 )
 

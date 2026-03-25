@@ -1,0 +1,15 @@
+{% if activity %}
+<div class="bg-white rounded-xl border border-gray-200 p-4 mb-4">
+    <h3 class="font-semibold text-sm mb-3 text-gray-700">Recent Activity</h3>
+    <div class="space-y-2">
+        {% for a in activity %}
+        <div class="flex items-center gap-2 text-xs text-gray-500">
+            <span class="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0"></span>
+            <span class="font-medium text-gray-700">{{ a.action }}</span>
+            {% if a.meta %}<span>{{ a.meta[:60] }}</span>{% endif %}
+            <span class="ml-auto text-gray-400">{{ a.created_at[11:16] if a.created_at else '' }}</span>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}

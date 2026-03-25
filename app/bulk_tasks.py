@@ -1,7 +1,7 @@
 from app.celery_app import celery_app
 from app.ai_responder import generate_response
 from app.config import ANTHROPIC_API_KEY
-from app.database import db_connection, save_response, approve_response, add_audit
+from app.database import db_connection, save_response, approve_response, add_audit, save_tags
 from app.notifications import send_notifications
 
 
@@ -32,6 +32,7 @@ def generate_bulk_task(self, account_id: int, review_ids: list[int], auto_approv
             brand_facts=rev["brand_facts"] or "",
         )
         resp_id = save_response(rev["id"], ai_response)
+        save_tags(rev["id"], extract_tags(rev["text"]))
         add_audit(account_id, account_id, "bulk.generate", "review", rev["id"], "")
         should_auto = auto_approve and (rev["auto_approve_high"] or rev["rating"] >= 4)
         if should_auto:
@@ -47,3 +48,24 @@ def generate_bulk_task(self, account_id: int, review_ids: list[int], auto_approv
                 "rating": rev["rating"],
                 "author": rev["author"],
             })
+
+
+def extract_tags(text: str) -> list[str]:
+    txt = (text or "").lower()
+    buckets = {
+        "service": ["service", "staff", "rude", "friendly", "attentive"],
+        "speed": ["slow", "wait", "waiting", "delay", "delayed"],
+        "price": ["price", "expensive", "cheap", "value", "overpriced"],
+        "quality": ["quality", "cold", "stale", "burnt", "raw"],
+        "cleanliness": ["clean", "dirty", "filthy"],
+        "booking": ["booking", "reservation", "reserved"],
+        "noise": ["noise", "noisy", "loud"],
+        "ambience": ["ambience", "atmosphere"],
+        "location": ["parking", "location"],
+        "food": ["food", "meal", "dish", "pizza", "burger", "coffee"],
+    }
+    found = []
+    for tag, kws in buckets.items():
+        if any(k in txt for k in kws):
+            found.append(tag)
+    return list(dict.fromkeys(found))

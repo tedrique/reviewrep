@@ -128,7 +128,29 @@
         </div>
     </div>
 
+    {% if stats.pending == 0 and stats.total > 0 %}
+    <div class="mb-4 bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-lg text-sm flex items-center gap-2">
+        <span class="font-semibold">Inbox zero!</span> All reviews are approved or published. Keep an eye on new ones.
+    </div>
+    {% endif %}
+
     {% include "partials/analytics_cards.html" %}
+    {% if top_tags %}
+    <div class="bg-white rounded-xl border border-gray-200 p-4 mb-6">
+        <div class="flex justify-between items-center mb-2">
+            <div class="text-sm font-semibold text-gray-700">Top reasons (last imports)</div>
+            <div class="text-xs text-gray-500">Pain points to fix</div>
+        </div>
+        <div class="flex flex-wrap gap-2">
+            {% for t in top_tags %}
+            <span class="px-3 py-1 rounded-full bg-rose-50 text-rose-700 text-xs font-semibold border border-rose-100">
+                {{ t.tag }} · {{ t.c }}
+            </span>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
     {% include "partials/activity_feed.html" %}
     {% include "partials/bulk_status.html" %}
 
@@ -264,6 +286,14 @@
 
                 <!-- Review text -->
                 <p class="text-gray-700 text-sm mb-4">{{ review.text }}</p>
+                {% set tags = review_tags.get(review.id) if review_tags else [] %}
+                {% if tags %}
+                <div class="flex flex-wrap gap-2 mb-3">
+                    {% for t in tags %}
+                    <span class="px-2 py-1 rounded-full bg-gray-100 text-gray-700 text-[11px]">{{ t }}</span>
+                    {% endfor %}
+                </div>
+                {% endif %}
 
                 <!-- AI Response -->
                 {% if review.ai_response %}
@@ -280,6 +310,15 @@
                     {% if review.missing_fact %}
                     <div class="mb-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded">
                         Key brand fact may be missing — please review.
+                        {% if current_business.brand_usp %}
+                        <button type="button" onclick="insertBrandFact(this, '{{ current_business.brand_usp|replace(\"'\",\"\\'\")|replace('\"','&quot;') }}')" class="ml-2 text-amber-800 underline">Insert USP</button>
+                        {% endif %}
+                        {% if current_business.brand_hours %}
+                        <button type="button" onclick="insertBrandFact(this, '{{ current_business.brand_hours|replace(\"'\",\"\\'\")|replace('\"','&quot;') }}')" class="ml-2 text-amber-800 underline">Insert hours</button>
+                        {% endif %}
+                        {% if current_business.brand_services %}
+                        <button type="button" onclick="insertBrandFact(this, '{{ current_business.brand_services|replace(\"'\",\"\\'\")|replace('\"','&quot;') }}')" class="ml-2 text-amber-800 underline">Insert services</button>
+                        {% endif %}
                     </div>
                     {% endif %}
 
@@ -368,5 +407,17 @@
 </div>
 <script>pollTask("{{ request.query_params.get('task') }}");</script>
 {% endif %}
+
+<script>
+function insertBrandFact(btn, fact) {
+    const card = btn.closest(".bg-blue-50") || btn.closest("form") || document;
+    const textarea = card.querySelector("textarea");
+    if (!textarea || !fact) return;
+    if (!textarea.value.includes(fact)) {
+        textarea.value = textarea.value.trim() + (textarea.value.trim() ? "\n" : "") + fact;
+    }
+    textarea.focus();
+}
+</script>
 
 {% endblock %}

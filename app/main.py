@@ -17,7 +17,7 @@ from app.database import (
     get_notification_prefs, save_notification_pref,
     get_team_members, create_team_invite, attach_member_user, remove_team_member,
     add_audit, count_responses_this_month, get_dead_letters,
-    add_comment, get_comments_by_review_ids,
+    add_comment, get_comments_by_review_ids, get_tags_by_review_ids, get_top_tags,
 )
 from app.ai_responder import generate_response
 from app.notifications import send_notifications
@@ -358,7 +358,9 @@ async def dashboard(request: Request):
             rating_filter=rating_filter,
             search=search,
         )
-        comments = get_comments_by_review_ids([r["id"] for r in reviews])
+        review_ids = [r["id"] for r in reviews]
+        comments = get_comments_by_review_ids(review_ids)
+        review_tags = get_tags_by_review_ids(review_ids)
         total_pages = max(1, (total + per_page - 1) // per_page)
         # Insights
         from app.database import db_connection
@@ -421,8 +423,11 @@ async def dashboard(request: Request):
                 SELECT action, meta, created_at FROM audit_log
                 WHERE account_id=? ORDER BY created_at DESC LIMIT 10
             """, (account_id,)).fetchall()
+            top_tags = get_top_tags(current_business["id"])
     else:
         comments = {}
+        review_tags = {}
+        top_tags = []
         total_pages = 1
         total = 0
         approved = 0
@@ -467,6 +472,8 @@ async def dashboard(request: Request):
         "ttr_7d": ttr_7d,
         "activity": activity,
         "comments": comments,
+        "review_tags": review_tags,
+        "top_tags": top_tags if businesses else [],
     })
 
 

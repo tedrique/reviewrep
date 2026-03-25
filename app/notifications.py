@@ -18,6 +18,14 @@ def _build_text(event: str, payload: Dict) -> str:
         return f"Response approved for {biz}. See history at {APP_URL}/dashboard"
     if event == "sla_alert":
         return f"SLA alert: {rating}★ review waiting >24h for {biz}. Go approve now."
+    if event == "roi_digest":
+        return (
+            f"[BETA] Weekly ROI: {payload.get('approved', 0)} replies sent, "
+            f"{payload.get('negatives_handled', 0)} negative handled, "
+            f"~{payload.get('minutes_saved', 0)} min saved. "
+            f"Rating delta 30d: {payload.get('rating_delta', 'n/a')}. "
+            f"See more at {APP_URL}/dashboard"
+        )
     return f"Update for {biz} — {event}"
 
 
