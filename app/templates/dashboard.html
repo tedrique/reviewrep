@@ -311,13 +311,13 @@
                     <div class="mb-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded">
                         Key brand fact may be missing — please review.
                         {% if current_business.brand_usp %}
-                        <button type="button" onclick="insertBrandFact(this, '{{ current_business.brand_usp|replace(\"'\",\"\\'\")|replace('\"','&quot;') }}')" class="ml-2 text-amber-800 underline">Insert USP</button>
+                        <button type="button" data-fact="{{ current_business.brand_usp | e }}" onclick="insertBrandFact(this)" class="ml-2 text-amber-800 underline">Insert USP</button>
                         {% endif %}
                         {% if current_business.brand_hours %}
-                        <button type="button" onclick="insertBrandFact(this, '{{ current_business.brand_hours|replace(\"'\",\"\\'\")|replace('\"','&quot;') }}')" class="ml-2 text-amber-800 underline">Insert hours</button>
+                        <button type="button" data-fact="{{ current_business.brand_hours | e }}" onclick="insertBrandFact(this)" class="ml-2 text-amber-800 underline">Insert hours</button>
                         {% endif %}
                         {% if current_business.brand_services %}
-                        <button type="button" onclick="insertBrandFact(this, '{{ current_business.brand_services|replace(\"'\",\"\\'\")|replace('\"','&quot;') }}')" class="ml-2 text-amber-800 underline">Insert services</button>
+                        <button type="button" data-fact="{{ current_business.brand_services | e }}" onclick="insertBrandFact(this)" class="ml-2 text-amber-800 underline">Insert services</button>
                         {% endif %}
                     </div>
                     {% endif %}
@@ -409,7 +409,8 @@
 {% endif %}
 
 <script>
-function insertBrandFact(btn, fact) {
+function insertBrandFact(btn) {
+    const fact = btn.dataset.fact || "";
     const card = btn.closest(".bg-blue-50") || btn.closest("form") || document;
     const textarea = card.querySelector("textarea");
     if (!textarea || !fact) return;
