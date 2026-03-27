@@ -58,6 +58,11 @@ static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+# Svelte frontend (built static files)
+frontend_dist = Path(__file__).parent.parent / "frontend_dist"
+if frontend_dist.exists():
+    app.mount("/app", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+
 # Simple in-memory rate limiting per IP (best-effort)
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
