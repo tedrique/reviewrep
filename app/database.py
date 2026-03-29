@@ -1,21 +1,34 @@
-"""SQLite database models and connection."""
+"""Database layer — PostgreSQL (prod) with SQLite fallback (dev)."""
+import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import contextmanager
-from app.config import DB_PATH
 
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+USE_PG = DATABASE_URL.startswith("postgresql")
 
-def get_db() -> sqlite3.Connection:
+if USE_PG:
+    import psycopg2
+    import psycopg2.extras
+
+# ---------- connection ----------
+
+def _pg_conn():
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = False
+    return conn
+
+def _sqlite_conn():
+    from app.config import DB_PATH
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
-
 @contextmanager
 def db_connection():
-    conn = get_db()
+    conn = _pg_conn() if USE_PG else _sqlite_conn()
     try:
         yield conn
         conn.commit()
@@ -25,225 +38,388 @@ def db_connection():
     finally:
         conn.close()
 
+def _cur(conn):
+    """Return a cursor — RealDictCursor for PG, normal for SQLite."""
+    if USE_PG:
+        return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    return conn
+
+def _ph(name: str = ""):
+    """Placeholder: %s for PG, ? for SQLite."""
+    return "%s" if USE_PG else "?"
+
+def _now():
+    return "NOW()" if USE_PG else "datetime('now')"
+
+def _execute(conn, sql, params=None):
+    """Execute with correct placeholder style."""
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) if USE_PG else conn
+    if params:
+        cur.execute(sql, params)
+    else:
+        cur.execute(sql)
+    return cur
+
+def _fetchone(conn, sql, params=None):
+    if USE_PG:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params or ())
+        row = cur.fetchone()
+        cur.close()
+        return dict(row) if row else None
+    else:
+        cur = conn.execute(sql, params or ())
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+def _fetchall(conn, sql, params=None):
+    if USE_PG:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params or ())
+        rows = cur.fetchall()
+        cur.close()
+        return [dict(r) for r in rows]
+    else:
+        cur = conn.execute(sql, params or ())
+        return [dict(r) for r in cur.fetchall()]
+
+def _insert_returning(conn, sql, params=None):
+    """Insert and return id. PG uses RETURNING, SQLite uses lastrowid."""
+    if USE_PG:
+        cur = conn.cursor()
+        cur.execute(sql + " RETURNING id", params or ())
+        row = cur.fetchone()
+        cur.close()
+        return row[0]
+    else:
+        cur = conn.execute(sql, params or ())
+        return cur.lastrowid
+
+# ---------- init ----------
+
+_PG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    google_id TEXT UNIQUE,
+    google_access_token TEXT DEFAULT '',
+    google_refresh_token TEXT DEFAULT '',
+    stripe_customer_id TEXT DEFAULT '',
+    subscription_status TEXT DEFAULT 'trial',
+    subscription_plan TEXT DEFAULT '',
+    trial_ends_at TEXT DEFAULT '',
+    email_verified INTEGER DEFAULT 0,
+    email_token TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS businesses (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'restaurant',
+    location TEXT NOT NULL DEFAULT '',
+    google_location_id TEXT DEFAULT '',
+    tone TEXT DEFAULT 'friendly and professional',
+    owner_name TEXT DEFAULT '',
+    auto_approve_high INTEGER DEFAULT 0,
+    banned_phrases TEXT DEFAULT '',
+    signoff_library TEXT DEFAULT '',
+    brand_facts TEXT DEFAULT '',
+    brand_hours TEXT DEFAULT '',
+    brand_services TEXT DEFAULT '',
+    brand_geo TEXT DEFAULT '',
+    brand_usp TEXT DEFAULT '',
+    allowed_phrases TEXT DEFAULT '',
+    auto_rule_1_2 TEXT DEFAULT 'draft',
+    auto_rule_3 TEXT DEFAULT 'draft',
+    auto_rule_4_5 TEXT DEFAULT 'approve',
+    quiet_hours TEXT DEFAULT '',
+    sla_hours_neg INTEGER DEFAULT 24,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS reviews (
+    id SERIAL PRIMARY KEY,
+    business_id INTEGER NOT NULL REFERENCES businesses(id),
+    google_review_id TEXT DEFAULT '',
+    author TEXT NOT NULL DEFAULT 'Customer',
+    rating INTEGER NOT NULL DEFAULT 5,
+    text TEXT NOT NULL DEFAULT '',
+    review_time TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS responses (
+    id SERIAL PRIMARY KEY,
+    review_id INTEGER NOT NULL REFERENCES reviews(id),
+    ai_response TEXT NOT NULL DEFAULT '',
+    edited_response TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    published_at TEXT DEFAULT '',
+    missing_fact INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS notification_prefs (
+    id SERIAL PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES users(id),
+    channel TEXT NOT NULL,
+    target TEXT NOT NULL,
+    events TEXT NOT NULL DEFAULT 'new_review,draft_ready',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS team_memberships (
+    id SERIAL PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES users(id),
+    member_user_id INTEGER REFERENCES users(id),
+    email TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'staff',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id SERIAL PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    target_type TEXT DEFAULT '',
+    target_id INTEGER,
+    meta TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_account ON audit_log(account_id);
+
+CREATE TABLE IF NOT EXISTS dead_letters (
+    id SERIAL PRIMARY KEY,
+    task TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    error TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS review_comments (
+    id SERIAL PRIMARY KEY,
+    review_id INTEGER NOT NULL REFERENCES reviews(id),
+    user_id INTEGER,
+    text TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS review_tags (
+    id SERIAL PRIMARY KEY,
+    review_id INTEGER NOT NULL REFERENCES reviews(id),
+    tag TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+_SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    google_id TEXT UNIQUE,
+    google_access_token TEXT DEFAULT '',
+    google_refresh_token TEXT DEFAULT '',
+    stripe_customer_id TEXT DEFAULT '',
+    subscription_status TEXT DEFAULT 'trial',
+    subscription_plan TEXT DEFAULT '',
+    trial_ends_at TEXT DEFAULT '',
+    email_verified INTEGER DEFAULT 0,
+    email_token TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS businesses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'restaurant',
+    location TEXT NOT NULL DEFAULT '',
+    google_location_id TEXT DEFAULT '',
+    tone TEXT DEFAULT 'friendly and professional',
+    owner_name TEXT DEFAULT '',
+    auto_approve_high INTEGER DEFAULT 0,
+    banned_phrases TEXT DEFAULT '',
+    signoff_library TEXT DEFAULT '',
+    brand_facts TEXT DEFAULT '',
+    brand_hours TEXT DEFAULT '',
+    brand_services TEXT DEFAULT '',
+    brand_geo TEXT DEFAULT '',
+    brand_usp TEXT DEFAULT '',
+    allowed_phrases TEXT DEFAULT '',
+    auto_rule_1_2 TEXT DEFAULT 'draft',
+    auto_rule_3 TEXT DEFAULT 'draft',
+    auto_rule_4_5 TEXT DEFAULT 'approve',
+    quiet_hours TEXT DEFAULT '',
+    sla_hours_neg INTEGER DEFAULT 24,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business_id INTEGER NOT NULL REFERENCES businesses(id),
+    google_review_id TEXT DEFAULT '',
+    author TEXT NOT NULL DEFAULT 'Customer',
+    rating INTEGER NOT NULL DEFAULT 5,
+    text TEXT NOT NULL DEFAULT '',
+    review_time TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS responses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id INTEGER NOT NULL REFERENCES reviews(id),
+    ai_response TEXT NOT NULL DEFAULT '',
+    edited_response TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    published_at TEXT DEFAULT '',
+    missing_fact INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS notification_prefs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES users(id),
+    channel TEXT NOT NULL,
+    target TEXT NOT NULL,
+    events TEXT NOT NULL DEFAULT 'new_review,draft_ready',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS team_memberships (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES users(id),
+    member_user_id INTEGER REFERENCES users(id),
+    email TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'staff',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    target_type TEXT DEFAULT '',
+    target_id INTEGER,
+    meta TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_account ON audit_log(account_id);
+
+CREATE TABLE IF NOT EXISTS dead_letters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    error TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS review_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id INTEGER NOT NULL REFERENCES reviews(id),
+    user_id INTEGER,
+    text TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS review_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id INTEGER NOT NULL REFERENCES reviews(id),
+    tag TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+"""
+
 
 def init_db():
     with db_connection() as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT UNIQUE NOT NULL,
-                name TEXT NOT NULL DEFAULT '',
-                google_id TEXT UNIQUE,
-                google_access_token TEXT DEFAULT '',
-                google_refresh_token TEXT DEFAULT '',
-                stripe_customer_id TEXT DEFAULT '',
-                subscription_status TEXT DEFAULT 'trial',
-                subscription_plan TEXT DEFAULT '',
-                trial_ends_at TEXT DEFAULT '',
-                email_verified INTEGER DEFAULT 0,
-                email_token TEXT DEFAULT '',
-                created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS businesses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL REFERENCES users(id),
-                name TEXT NOT NULL,
-                type TEXT NOT NULL DEFAULT 'restaurant',
-                location TEXT NOT NULL DEFAULT '',
-                google_location_id TEXT DEFAULT '',
-                tone TEXT DEFAULT 'friendly and professional',
-                owner_name TEXT DEFAULT '',
-                auto_approve_high INTEGER DEFAULT 0,
-                banned_phrases TEXT DEFAULT '',
-                signoff_library TEXT DEFAULT '',
-                brand_facts TEXT DEFAULT '',
-                brand_hours TEXT DEFAULT '',
-                brand_services TEXT DEFAULT '',
-                brand_geo TEXT DEFAULT '',
-                brand_usp TEXT DEFAULT '',
-                allowed_phrases TEXT DEFAULT '',
-                auto_rule_1_2 TEXT DEFAULT 'draft',
-                auto_rule_3 TEXT DEFAULT 'draft',
-                auto_rule_4_5 TEXT DEFAULT 'approve',
-                quiet_hours TEXT DEFAULT '',
-                sla_hours_neg INTEGER DEFAULT 24,
-                created_at TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS reviews (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                business_id INTEGER NOT NULL REFERENCES businesses(id),
-                google_review_id TEXT DEFAULT '',
-                author TEXT NOT NULL DEFAULT 'Customer',
-                rating INTEGER NOT NULL DEFAULT 5,
-                text TEXT NOT NULL DEFAULT '',
-                review_time TEXT DEFAULT '',
-                created_at TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS responses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                review_id INTEGER NOT NULL REFERENCES reviews(id),
-                ai_response TEXT NOT NULL DEFAULT '',
-                edited_response TEXT DEFAULT '',
-                status TEXT DEFAULT 'pending',
-                published_at TEXT DEFAULT '',
-                missing_fact INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS notification_prefs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL REFERENCES users(id),
-                channel TEXT NOT NULL,
-                target TEXT NOT NULL,
-                events TEXT NOT NULL DEFAULT 'new_review,draft_ready',
-                created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS team_memberships (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL REFERENCES users(id),
-                member_user_id INTEGER REFERENCES users(id),
-                email TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'staff',
-                status TEXT NOT NULL DEFAULT 'pending',
-                created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                action TEXT NOT NULL,
-                target_type TEXT DEFAULT '',
-                target_id INTEGER,
-                meta TEXT DEFAULT '',
-                created_at TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_audit_account ON audit_log(account_id);
-
-            CREATE TABLE IF NOT EXISTS dead_letters (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                error TEXT NOT NULL,
-                created_at TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS review_comments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                review_id INTEGER NOT NULL REFERENCES reviews(id),
-                user_id INTEGER,
-                text TEXT NOT NULL,
-                created_at TEXT DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS review_tags (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                review_id INTEGER NOT NULL REFERENCES reviews(id),
-                tag TEXT NOT NULL,
-                created_at TEXT DEFAULT (datetime('now'))
-            );
-        """)
-
-        # Backfill new columns for existing databases
-        for sql in [
-            "ALTER TABLE businesses ADD COLUMN auto_approve_high INTEGER DEFAULT 0",
-            "ALTER TABLE businesses ADD COLUMN banned_phrases TEXT DEFAULT ''",
-            "ALTER TABLE businesses ADD COLUMN signoff_library TEXT DEFAULT ''",
-            "ALTER TABLE businesses ADD COLUMN brand_facts TEXT DEFAULT ''",
-        ]:
-            try:
-                conn.execute(sql)
-            except Exception:
-                pass
+        schema = _PG_SCHEMA if USE_PG else _SQLITE_SCHEMA
+        if USE_PG:
+            cur = conn.cursor()
+            cur.execute(schema)
+            cur.close()
+        else:
+            conn.executescript(schema)
 
 
-# --- Helper queries ---
+# ---------- users ----------
 
 def create_user(email: str, name: str, google_id: str, access_token: str = "", refresh_token: str = "") -> int:
-    from datetime import timedelta
     trial_end = (datetime.utcnow() + timedelta(days=7)).isoformat()
+    p = "%s" if USE_PG else "?"
     with db_connection() as conn:
-        # Check by email first (covers demo re-login)
-        existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
-        if not existing:
-            existing = conn.execute("SELECT id FROM users WHERE google_id = ?", (google_id,)).fetchone()
+        existing = _fetchone(conn, f"SELECT id FROM users WHERE email = {p}", (email,))
+        if not existing and google_id:
+            existing = _fetchone(conn, f"SELECT id FROM users WHERE google_id = {p}", (google_id,))
         if existing:
-            conn.execute(
-                "UPDATE users SET google_access_token = ?, google_refresh_token = ?, updated_at = datetime('now') WHERE id = ?",
-                (access_token, refresh_token or "", existing["id"])
-            )
+            _execute(conn, f"UPDATE users SET google_access_token = {p}, google_refresh_token = {p}, updated_at = NOW() WHERE id = {p}" if USE_PG else f"UPDATE users SET google_access_token = ?, google_refresh_token = ?, updated_at = datetime('now') WHERE id = ?",
+                     (access_token, refresh_token or "", existing["id"]))
             return existing["id"]
-        cursor = conn.execute(
-            "INSERT INTO users (email, name, google_id, google_access_token, google_refresh_token, trial_ends_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (email, name, google_id, access_token, refresh_token or "", trial_end)
-        )
-        return cursor.lastrowid
+        return _insert_returning(conn,
+            f"INSERT INTO users (email, name, google_id, google_access_token, google_refresh_token, trial_ends_at) VALUES ({p}, {p}, {p}, {p}, {p}, {p})",
+            (email, name, google_id, access_token, refresh_token or "", trial_end))
 
 
 def get_user(user_id: int) -> dict | None:
+    p = "%s" if USE_PG else "?"
     with db_connection() as conn:
-        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-        return dict(row) if row else None
+        return _fetchone(conn, f"SELECT * FROM users WHERE id = {p}", (user_id,))
 
 
-def create_business(
-    user_id: int,
-    name: str,
-    business_type: str,
-    location: str,
-    tone: str = "friendly and professional",
-    auto_approve_high: int = 0,
-    banned_phrases: str = "",
-    signoff_library: str = "",
-    brand_facts: str = "",
-) -> int:
+# ---------- businesses ----------
+
+def create_business(user_id: int, name: str, business_type: str, location: str,
+                    tone: str = "friendly and professional",
+                    auto_approve_high: int = 0, banned_phrases: str = "",
+                    signoff_library: str = "", brand_facts: str = "") -> int:
+    p = "%s" if USE_PG else "?"
     with db_connection() as conn:
-        cursor = conn.execute(
-            """INSERT INTO businesses (user_id, name, type, location, tone, auto_approve_high, banned_phrases, signoff_library, brand_facts)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, name, business_type, location, tone, auto_approve_high, banned_phrases, signoff_library, brand_facts)
-        )
-        return cursor.lastrowid
+        return _insert_returning(conn,
+            f"INSERT INTO businesses (user_id, name, type, location, tone, auto_approve_high, banned_phrases, signoff_library, brand_facts) VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p})",
+            (user_id, name, business_type, location, tone, auto_approve_high, banned_phrases, signoff_library, brand_facts))
 
 
 def get_businesses(user_id: int) -> list[dict]:
+    p = "%s" if USE_PG else "?"
     with db_connection() as conn:
-        rows = conn.execute("SELECT * FROM businesses WHERE user_id = ?", (user_id,)).fetchall()
-        return [dict(r) for r in rows]
+        return _fetchall(conn, f"SELECT * FROM businesses WHERE user_id = {p}", (user_id,))
 
+
+# ---------- reviews ----------
 
 def add_review(business_id: int, author: str, rating: int, text: str, google_review_id: str = "", review_time: str = "") -> int:
+    p = "%s" if USE_PG else "?"
     with db_connection() as conn:
-        cursor = conn.execute(
-            "INSERT INTO reviews (business_id, author, rating, text, google_review_id, review_time) VALUES (?, ?, ?, ?, ?, ?)",
-            (business_id, author, rating, text, google_review_id, review_time)
-        )
-        return cursor.lastrowid
+        return _insert_returning(conn,
+            f"INSERT INTO reviews (business_id, author, rating, text, google_review_id, review_time) VALUES ({p},{p},{p},{p},{p},{p})",
+            (business_id, author, rating, text, google_review_id, review_time))
 
 
-def get_reviews(
-    business_id: int,
-    limit: int = 50,
-    offset: int = 0,
-    status: str | None = None,
-    rating_filter: str | None = None,
-    search: str | None = None,
-) -> list[dict]:
-    sql = """
+def get_reviews(business_id: int, limit: int = 50, offset: int = 0,
+                status: str | None = None, rating_filter: str | None = None, search: str | None = None) -> list[dict]:
+    p = "%s" if USE_PG else "?"
+    sql = f"""
         SELECT r.*, resp.ai_response, resp.edited_response, resp.status as response_status, resp.id as response_id
         FROM reviews r
         LEFT JOIN responses resp ON resp.review_id = r.id
-        WHERE r.business_id = :biz
+        WHERE r.business_id = {p}
     """
-    params = {"biz": business_id, "limit": limit, "offset": offset}
+    params: list = [business_id]
     if status == "needs_action":
         sql += " AND ((resp.status IS NULL) OR (resp.status != 'approved'))"
     elif status == "pending":
@@ -257,237 +433,223 @@ def get_reviews(
     elif rating_filter == "pos":
         sql += " AND r.rating >= 4"
     if search:
-        sql += " AND (r.text LIKE :q OR r.author LIKE :q)"
-        params["q"] = f"%{search}%"
-    sql += " ORDER BY r.created_at DESC LIMIT :limit OFFSET :offset"
+        sql += f" AND (r.text LIKE {p} OR r.author LIKE {p})"
+        params += [f"%{search}%", f"%{search}%"]
+    sql += f" ORDER BY r.created_at DESC LIMIT {p} OFFSET {p}"
+    params += [limit, offset]
     with db_connection() as conn:
-        rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
-
-
-def save_response(review_id: int, ai_response: str) -> int:
-    with db_connection() as conn:
-        existing = conn.execute("SELECT id FROM responses WHERE review_id = ?", (review_id,)).fetchone()
-        if existing:
-            conn.execute("UPDATE responses SET ai_response = ?, status = 'pending', created_at = datetime('now') WHERE id = ?",
-                         (ai_response, existing["id"]))
-            return existing["id"]
-        cursor = conn.execute("INSERT INTO responses (review_id, ai_response, status) VALUES (?, ?, 'pending')",
-                              (review_id, ai_response))
-        return cursor.lastrowid
-
-def save_response_with_flags(review_id: int, ai_response: str, missing_fact: int = 0) -> int:
-    with db_connection() as conn:
-        existing = conn.execute("SELECT id FROM responses WHERE review_id = ?", (review_id,)).fetchone()
-        if existing:
-            conn.execute("UPDATE responses SET ai_response = ?, status = 'pending', missing_fact=?, created_at = datetime('now') WHERE id = ?",
-                         (ai_response, missing_fact, existing["id"]))
-            return existing["id"]
-        cursor = conn.execute("INSERT INTO responses (review_id, ai_response, status, missing_fact) VALUES (?, ?, 'pending', ?)",
-                              (review_id, ai_response, missing_fact))
-        return cursor.lastrowid
+        return _fetchall(conn, sql, tuple(params))
 
 
 def count_reviews(business_id: int) -> int:
+    p = "%s" if USE_PG else "?"
     with db_connection() as conn:
-        row = conn.execute("SELECT COUNT(*) as c FROM reviews WHERE business_id = ?", (business_id,)).fetchone()
+        row = _fetchone(conn, f"SELECT COUNT(*) as c FROM reviews WHERE business_id = {p}", (business_id,))
         return row["c"] if row else 0
+
+
+# ---------- responses ----------
+
+def save_response(review_id: int, ai_response: str) -> int:
+    p = "%s" if USE_PG else "?"
+    now = "NOW()" if USE_PG else "datetime('now')"
+    with db_connection() as conn:
+        existing = _fetchone(conn, f"SELECT id FROM responses WHERE review_id = {p}", (review_id,))
+        if existing:
+            _execute(conn, f"UPDATE responses SET ai_response = {p}, status = 'pending', created_at = {now} WHERE id = {p}",
+                     (ai_response, existing["id"]))
+            return existing["id"]
+        return _insert_returning(conn,
+            f"INSERT INTO responses (review_id, ai_response, status) VALUES ({p}, {p}, 'pending')",
+            (review_id, ai_response))
+
+
+def save_response_with_flags(review_id: int, ai_response: str, missing_fact: int = 0) -> int:
+    p = "%s" if USE_PG else "?"
+    now = "NOW()" if USE_PG else "datetime('now')"
+    with db_connection() as conn:
+        existing = _fetchone(conn, f"SELECT id FROM responses WHERE review_id = {p}", (review_id,))
+        if existing:
+            _execute(conn, f"UPDATE responses SET ai_response = {p}, status = 'pending', missing_fact={p}, created_at = {now} WHERE id = {p}",
+                     (ai_response, missing_fact, existing["id"]))
+            return existing["id"]
+        return _insert_returning(conn,
+            f"INSERT INTO responses (review_id, ai_response, status, missing_fact) VALUES ({p}, {p}, 'pending', {p})",
+            (review_id, ai_response, missing_fact))
 
 
 def count_responses_this_month(user_id: int) -> int:
-    """Count responses created this calendar month for a user's businesses."""
+    p = "%s" if USE_PG else "?"
+    month_filter = "date_trunc('month', CURRENT_DATE)" if USE_PG else "date('now', 'start of month')"
     with db_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT COUNT(*) as c
-            FROM responses resp
+        row = _fetchone(conn, f"""
+            SELECT COUNT(*) as c FROM responses resp
             JOIN reviews r ON resp.review_id = r.id
             JOIN businesses b ON r.business_id = b.id
-            WHERE b.user_id = ? AND resp.created_at >= date('now', 'start of month')
-            """,
-            (user_id,),
-        ).fetchone()
+            WHERE b.user_id = {p} AND resp.created_at >= {month_filter}
+        """, (user_id,))
         return row["c"] if row else 0
 
 
-# --- Audit log ---
+def approve_response(response_id: int, edited_text: str = "") -> None:
+    p = "%s" if USE_PG else "?"
+    now = "NOW()" if USE_PG else "datetime('now')"
+    with db_connection() as conn:
+        _execute(conn, f"UPDATE responses SET status = 'approved', edited_response = {p}, published_at = {now} WHERE id = {p}",
+                 (edited_text, response_id))
+
+
+# ---------- audit ----------
 
 def add_audit(account_id: int, user_id: int, action: str, target_type: str = "", target_id: int | None = None, meta: str = ""):
+    p = "%s" if USE_PG else "?"
+    now = "NOW()" if USE_PG else "datetime('now')"
     with db_connection() as conn:
-        conn.execute(
-            "INSERT INTO audit_log (account_id, user_id, action, target_type, target_id, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
-            (account_id, user_id, action, target_type, target_id, meta)
-        )
+        _execute(conn, f"INSERT INTO audit_log (account_id, user_id, action, target_type, target_id, meta, created_at) VALUES ({p},{p},{p},{p},{p},{p},{now})",
+                 (account_id, user_id, action, target_type, target_id, meta))
 
 
 def log_dead_letter(task: str, payload: str, error: str):
+    p = "%s" if USE_PG else "?"
+    now = "NOW()" if USE_PG else "datetime('now')"
     with db_connection() as conn:
-        conn.execute(
-            "INSERT INTO dead_letters (task, payload, error, created_at) VALUES (?, ?, ?, datetime('now'))",
-            (task, payload, error[:1000])
-        )
+        _execute(conn, f"INSERT INTO dead_letters (task, payload, error, created_at) VALUES ({p},{p},{p},{now})",
+                 (task, payload, error[:1000]))
 
 
 def get_dead_letters(limit: int = 50) -> list[dict]:
+    p = "%s" if USE_PG else "?"
     with db_connection() as conn:
-        rows = conn.execute("SELECT * FROM dead_letters ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
-        return [dict(r) for r in rows]
+        return _fetchall(conn, f"SELECT * FROM dead_letters ORDER BY created_at DESC LIMIT {p}", (limit,))
 
 
-def approve_response(response_id: int, edited_text: str = "") -> None:
+# ---------- notifications ----------
+
+def get_notification_prefs(account_id: int) -> list[dict]:
+    p = "%s" if USE_PG else "?"
     with db_connection() as conn:
-        conn.execute(
-            "UPDATE responses SET status = 'approved', edited_response = ?, published_at = datetime('now') WHERE id = ?",
-            (edited_text, response_id)
-        )
+        return _fetchall(conn, f"SELECT * FROM notification_prefs WHERE account_id = {p}", (account_id,))
 
 
-# --- Comments ---
+def save_notification_pref(account_id: int, channel: str, target: str, events: str = "new_review,draft_ready") -> int:
+    p = "%s" if USE_PG else "?"
+    now = "NOW()" if USE_PG else "datetime('now')"
+    with db_connection() as conn:
+        existing = _fetchone(conn, f"SELECT id FROM notification_prefs WHERE account_id = {p} AND channel = {p}", (account_id, channel))
+        if existing:
+            _execute(conn, f"UPDATE notification_prefs SET target = {p}, events = {p}, updated_at = {now} WHERE id = {p}",
+                     (target, events, existing["id"]))
+            return existing["id"]
+        return _insert_returning(conn,
+            f"INSERT INTO notification_prefs (account_id, channel, target, events) VALUES ({p},{p},{p},{p})",
+            (account_id, channel, target, events))
 
+
+# ---------- team ----------
+
+def get_team_members(account_id: int) -> list[dict]:
+    p = "%s" if USE_PG else "?"
+    with db_connection() as conn:
+        return _fetchall(conn, f"""
+            SELECT tm.*, u.name as user_name, u.email as user_email
+            FROM team_memberships tm
+            LEFT JOIN users u ON tm.member_user_id = u.id
+            WHERE tm.account_id = {p}
+            ORDER BY tm.created_at
+        """, (account_id,))
+
+
+def create_team_invite(account_id: int, email: str, role: str = "staff") -> int:
+    p = "%s" if USE_PG else "?"
+    with db_connection() as conn:
+        return _insert_returning(conn,
+            f"INSERT INTO team_memberships (account_id, email, role, status) VALUES ({p},{p},{p},'pending')",
+            (account_id, email, role))
+
+
+def attach_member_user(email: str, user_id: int) -> dict | None:
+    p = "%s" if USE_PG else "?"
+    now = "NOW()" if USE_PG else "datetime('now')"
+    with db_connection() as conn:
+        invite = _fetchone(conn, f"SELECT * FROM team_memberships WHERE email = {p} AND status = 'pending'", (email,))
+        if invite:
+            _execute(conn, f"UPDATE team_memberships SET member_user_id = {p}, status = 'active', updated_at = {now} WHERE id = {p}",
+                     (user_id, invite["id"]))
+            return invite
+        return None
+
+
+def remove_team_member(membership_id: int):
+    p = "%s" if USE_PG else "?"
+    with db_connection() as conn:
+        _execute(conn, f"DELETE FROM team_memberships WHERE id = {p}", (membership_id,))
+
+
+# ---------- comments ----------
 
 def add_comment(review_id: int, user_id: int | None, text: str) -> int:
+    p = "%s" if USE_PG else "?"
+    now = "NOW()" if USE_PG else "datetime('now')"
     with db_connection() as conn:
-        cur = conn.execute(
-            "INSERT INTO review_comments (review_id, user_id, text, created_at) VALUES (?, ?, ?, datetime('now'))",
-            (review_id, user_id, text)
-        )
-        return cur.lastrowid
+        return _insert_returning(conn,
+            f"INSERT INTO review_comments (review_id, user_id, text, created_at) VALUES ({p},{p},{p},{now})",
+            (review_id, user_id, text))
 
 
 def get_comments_by_review_ids(review_ids: list[int]) -> dict[int, list[dict]]:
     if not review_ids:
         return {}
-    placeholders = ",".join("?" for _ in review_ids)
-    sql = f"""
-        SELECT rc.*, u.name as user_name, u.email as user_email
-        FROM review_comments rc
-        LEFT JOIN users u ON rc.user_id = u.id
-        WHERE rc.review_id IN ({placeholders})
-        ORDER BY rc.created_at ASC
-    """
+    p = "%s" if USE_PG else "?"
+    placeholders = ",".join(p for _ in review_ids)
     with db_connection() as conn:
-        rows = conn.execute(sql, review_ids).fetchall()
+        rows = _fetchall(conn, f"""
+            SELECT rc.*, u.name as user_name, u.email as user_email
+            FROM review_comments rc
+            LEFT JOIN users u ON rc.user_id = u.id
+            WHERE rc.review_id IN ({placeholders})
+            ORDER BY rc.created_at ASC
+        """, tuple(review_ids))
         grouped: dict[int, list[dict]] = {}
         for r in rows:
-            grouped.setdefault(r["review_id"], []).append(dict(r))
+            grouped.setdefault(r["review_id"], []).append(r)
         return grouped
 
 
-# --- Tags ---
-
+# ---------- tags ----------
 
 def save_tags(review_id: int, tags: list[str]):
     if tags is None:
         tags = []
+    p = "%s" if USE_PG else "?"
+    now = "NOW()" if USE_PG else "datetime('now')"
     with db_connection() as conn:
-        conn.execute("DELETE FROM review_tags WHERE review_id = ?", (review_id,))
+        _execute(conn, f"DELETE FROM review_tags WHERE review_id = {p}", (review_id,))
         for t in tags:
-            conn.execute("INSERT INTO review_tags (review_id, tag, created_at) VALUES (?, ?, datetime('now'))", (review_id, t))
+            _execute(conn, f"INSERT INTO review_tags (review_id, tag, created_at) VALUES ({p},{p},{now})", (review_id, t))
 
 
 def get_tags_by_review_ids(review_ids: list[int]) -> dict[int, list[str]]:
     if not review_ids:
         return {}
-    placeholders = ",".join("?" for _ in review_ids)
-    sql = f"SELECT review_id, tag FROM review_tags WHERE review_id IN ({placeholders})"
+    p = "%s" if USE_PG else "?"
+    placeholders = ",".join(p for _ in review_ids)
     with db_connection() as conn:
-        rows = conn.execute(sql, review_ids).fetchall()
+        rows = _fetchall(conn, f"SELECT review_id, tag FROM review_tags WHERE review_id IN ({placeholders})", tuple(review_ids))
         grouped: dict[int, list[str]] = {}
         for r in rows:
             grouped.setdefault(r["review_id"], []).append(r["tag"])
         return grouped
 
 
-def get_top_tags(business_id: int, limit: int = 5) -> list[dict]:
-    sql = """
-        SELECT rt.tag, COUNT(*) as c
-        FROM review_tags rt
-        JOIN reviews r ON rt.review_id = r.id
-        WHERE r.business_id = ?
-        GROUP BY rt.tag
-        ORDER BY c DESC
-        LIMIT ?
-    """
+def get_top_tags(business_id: int, limit: int = 10) -> list[dict]:
+    p = "%s" if USE_PG else "?"
     with db_connection() as conn:
-        rows = conn.execute(sql, (business_id, limit)).fetchall()
-        return [dict(r) for r in rows]
-
-
-# --- Notifications ---
-
-def get_notification_prefs(account_id: int) -> list[dict]:
-    with db_connection() as conn:
-        rows = conn.execute("SELECT * FROM notification_prefs WHERE account_id = ?", (account_id,)).fetchall()
-        return [dict(r) for r in rows]
-
-
-def save_notification_pref(account_id: int, channel: str, target: str, events: str) -> None:
-    with db_connection() as conn:
-        existing = conn.execute(
-            "SELECT id FROM notification_prefs WHERE account_id = ? AND channel = ?",
-            (account_id, channel)
-        ).fetchone()
-        if existing:
-            conn.execute(
-                "UPDATE notification_prefs SET target = ?, events = ?, updated_at = datetime('now') WHERE id = ?",
-                (target, events, existing["id"])
-            )
-        else:
-            conn.execute(
-                "INSERT INTO notification_prefs (account_id, channel, target, events) VALUES (?, ?, ?, ?)",
-                (account_id, channel, target, events)
-            )
-
-
-# --- Team ---
-
-def create_team_invite(account_id: int, email: str, role: str) -> int:
-    with db_connection() as conn:
-        existing = conn.execute(
-            "SELECT id FROM team_memberships WHERE account_id = ? AND email = ?",
-            (account_id, email)
-        ).fetchone()
-        if existing:
-            conn.execute("UPDATE team_memberships SET role = ?, status = 'pending', updated_at = datetime('now') WHERE id = ?",
-                         (role, existing["id"]))
-            return existing["id"]
-        cur = conn.execute(
-            "INSERT INTO team_memberships (account_id, email, role, status) VALUES (?, ?, ?, 'pending')",
-            (account_id, email, role)
-        )
-        return cur.lastrowid
-
-
-def get_team_members(account_id: int) -> list[dict]:
-    with db_connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM team_memberships WHERE account_id = ? ORDER BY created_at DESC",
-            (account_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def attach_member_user(email: str, user_id: int) -> dict | None:
-    """Link a logged-in user to a pending invite."""
-    with db_connection() as conn:
-        invite = conn.execute(
-            "SELECT * FROM team_memberships WHERE email = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
-            (email,)
-        ).fetchone()
-        if not invite:
-            return None
-        conn.execute(
-            "UPDATE team_memberships SET member_user_id = ?, status = 'active', updated_at = datetime('now') WHERE id = ?",
-            (user_id, invite["id"])
-        )
-        return dict(invite)
-
-
-def remove_team_member(account_id: int, member_id: int) -> None:
-    with db_connection() as conn:
-        conn.execute("DELETE FROM team_memberships WHERE account_id = ? AND id = ?", (account_id, member_id))
-
-
-if __name__ == "__main__":
-    init_db()
-    print(f"Database initialized at {DB_PATH}")
+        return _fetchall(conn, f"""
+            SELECT rt.tag, COUNT(*) as cnt
+            FROM review_tags rt
+            JOIN reviews r ON rt.review_id = r.id
+            WHERE r.business_id = {p}
+            GROUP BY rt.tag
+            ORDER BY cnt DESC
+            LIMIT {p}
+        """, (business_id, limit))
