@@ -1295,6 +1295,7 @@ async def debug_logs(request: Request, token: str = "", lines: int = 50):
     dead = get_dead_letters()
 
     # Google API diagnostics
+    import requests as http_requests
     google_diag = {}
     with db_connection() as conn:
         u = _fetchone(conn, "SELECT id, email, google_access_token, google_refresh_token FROM users LIMIT 1")
@@ -1305,13 +1306,26 @@ async def debug_logs(request: Request, token: str = "", lines: int = 50):
             google_diag["token_preview"] = tok[:20] + "..." if tok else "none"
             if tok:
                 try:
-                    r = requests.get(
+                    # Test accounts endpoint
+                    r1 = http_requests.get(
                         "https://mybusinessaccountmanagement.googleapis.com/v1/accounts",
                         headers={"Authorization": f"Bearer {tok}"},
                         timeout=10,
                     )
-                    google_diag["accounts_status"] = r.status_code
-                    google_diag["accounts_response"] = r.json()
+                    google_diag["accounts_status"] = r1.status_code
+                    google_diag["accounts_response"] = r1.json()
+                    # If accounts work, try locations
+                    if r1.status_code == 200:
+                        accounts = r1.json().get("accounts", [])
+                        if accounts:
+                            acc_name = accounts[0]["name"]
+                            r2 = http_requests.get(
+                                f"https://mybusinessbusinessinformation.googleapis.com/v1/{acc_name}/locations",
+                                headers={"Authorization": f"Bearer {tok}"},
+                                timeout=10,
+                            )
+                            google_diag["locations_status"] = r2.status_code
+                            google_diag["locations_response"] = r2.json()
                 except Exception as e:
                     google_diag["accounts_error"] = str(e)
 
