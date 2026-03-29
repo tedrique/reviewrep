@@ -129,48 +129,30 @@ def _now():
     return "NOW()" if USE_PG else "datetime('now')"
 
 def _execute(conn, sql, params=None):
-    """Execute with correct placeholder style."""
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) if USE_PG else conn
-    if params:
-        cur.execute(sql, params)
-    else:
-        cur.execute(sql)
-    return cur
+    """Execute via DbConn wrapper — auto-converts ? to %s for PG."""
+    return conn.execute(sql, params)
 
 def _fetchone(conn, sql, params=None):
-    if USE_PG:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(sql, params or ())
-        row = cur.fetchone()
-        cur.close()
-        return dict(row) if row else None
-    else:
-        cur = conn.execute(sql, params or ())
-        row = cur.fetchone()
-        return dict(row) if row else None
+    result = conn.execute(sql, params or ())
+    if result is None:
+        return None
+    row = result.fetchone()
+    return dict(row) if row else None
 
 def _fetchall(conn, sql, params=None):
-    if USE_PG:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(sql, params or ())
-        rows = cur.fetchall()
-        cur.close()
-        return [dict(r) for r in rows]
-    else:
-        cur = conn.execute(sql, params or ())
-        return [dict(r) for r in cur.fetchall()]
+    result = conn.execute(sql, params or ())
+    rows = result.fetchall()
+    return [dict(r) for r in rows]
 
 def _insert_returning(conn, sql, params=None):
     """Insert and return id. PG uses RETURNING, SQLite uses lastrowid."""
     if USE_PG:
-        cur = conn.cursor()
-        cur.execute(sql + " RETURNING id", params or ())
-        row = cur.fetchone()
-        cur.close()
-        return row[0]
+        result = conn.execute(sql + " RETURNING id", params or ())
+        row = result.fetchone()
+        return row["id"] if isinstance(row, dict) else row[0]
     else:
-        cur = conn.execute(sql, params or ())
-        return cur.lastrowid
+        result = conn.execute(sql, params or ())
+        return result.lastrowid
 
 # ---------- init ----------
 
@@ -426,12 +408,7 @@ CREATE TABLE IF NOT EXISTS review_tags (
 def init_db():
     with db_connection() as conn:
         schema = _PG_SCHEMA if USE_PG else _SQLITE_SCHEMA
-        if USE_PG:
-            cur = conn.cursor()
-            cur.execute(schema)
-            cur.close()
-        else:
-            conn.executescript(schema)
+        conn.executescript(schema)
 
 
 # ---------- users ----------
