@@ -11,14 +11,90 @@ if USE_PG:
     import psycopg2
     import psycopg2.extras
 
-# ---------- connection ----------
+# ---------- connection wrapper ----------
 
-def _pg_conn():
+class _PgRow(dict):
+    """Dict that also supports index access like sqlite3.Row."""
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+class _PgCursorResult:
+    """Wraps PG cursor fetchone/fetchall to return dicts like sqlite3.Row."""
+    def __init__(self, cursor):
+        self._cur = cursor
+        self._desc = cursor.description
+    def fetchone(self):
+        row = self._cur.fetchone()
+        if row is None:
+            return None
+        cols = [d[0] for d in self._desc]
+        return _PgRow(zip(cols, row))
+    def fetchall(self):
+        rows = self._cur.fetchall()
+        cols = [d[0] for d in self._desc]
+        return [_PgRow(zip(cols, r)) for r in rows]
+    @property
+    def lastrowid(self):
+        return getattr(self._cur, 'lastrowid', None)
+
+
+class DbConn:
+    """Wrapper that makes PG connections behave like SQLite for main.py compatibility.
+    Converts ? placeholders to %s for PG, returns dict-like rows."""
+    def __init__(self, raw_conn):
+        self._conn = raw_conn
+
+    def execute(self, sql, params=None):
+        if USE_PG:
+            sql = sql.replace("?", "%s")
+            # Convert SQLite date functions to PG equivalents
+            sql = sql.replace("datetime('now')", "NOW()")
+            sql = sql.replace("date('now')", "CURRENT_DATE")
+            sql = sql.replace("date('now','-7 day')", "(CURRENT_DATE - INTERVAL '7 days')")
+            sql = sql.replace("date('now','-30 day')", "(CURRENT_DATE - INTERVAL '30 days')")
+            sql = sql.replace("date('now','-60 day')", "(CURRENT_DATE - INTERVAL '60 days')")
+            sql = sql.replace("date('now', 'start of month')", "date_trunc('month', CURRENT_DATE)")
+            sql = sql.replace("strftime('%s',", "EXTRACT(EPOCH FROM ")
+            sql = sql.replace("strftime('%Y-%m-%d',", "TO_CHAR(")
+            if "TO_CHAR(" in sql and "as d" in sql.lower():
+                sql = sql.replace(") as d", ", 'YYYY-MM-DD') as d")
+            # PG doesn't have rowid
+            sql = sql.replace("ORDER BY rowid", "ORDER BY id")
+            cur = self._conn.cursor()
+            cur.execute(sql, params or ())
+            if cur.description:
+                return _PgCursorResult(cur)
+            return cur
+        else:
+            return self._conn.execute(sql, params or ())
+
+    def executescript(self, sql):
+        if USE_PG:
+            cur = self._conn.cursor()
+            cur.execute(sql)
+            cur.close()
+        else:
+            self._conn.executescript(sql)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+
+def _raw_pg_conn():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
     return conn
 
-def _sqlite_conn():
+def _raw_sqlite_conn():
     from app.config import DB_PATH
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -28,7 +104,8 @@ def _sqlite_conn():
 
 @contextmanager
 def db_connection():
-    conn = _pg_conn() if USE_PG else _sqlite_conn()
+    raw = _raw_pg_conn() if USE_PG else _raw_sqlite_conn()
+    conn = DbConn(raw)
     try:
         yield conn
         conn.commit()
