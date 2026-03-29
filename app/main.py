@@ -1281,17 +1281,15 @@ async def debug_logs(request: Request, token: str = "", lines: int = 50):
     log_content = _log_buffer.getvalue()
     log_lines = log_content.strip().split("\n") if log_content.strip() else []
 
-    from app.database import db_connection
+    from app.database import db_connection, _fetchall, _fetchone, USE_PG
+    p = "%s" if USE_PG else "?"
     with db_connection() as conn:
-        recent_errors = [dict(r) for r in conn.execute(
-            "SELECT * FROM audit_log WHERE action LIKE '%error%' ORDER BY created_at DESC LIMIT ?", (lines,)
-        ).fetchall()]
-
+        recent_errors = _fetchall(conn, f"SELECT * FROM audit_log WHERE action LIKE '%%error%%' ORDER BY created_at DESC LIMIT {p}", (lines,))
         db_stats = {
-            "users": conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"],
-            "businesses": conn.execute("SELECT COUNT(*) as c FROM businesses").fetchone()["c"],
-            "reviews": conn.execute("SELECT COUNT(*) as c FROM reviews").fetchone()["c"],
-            "responses": conn.execute("SELECT COUNT(*) as c FROM responses").fetchone()["c"],
+            "users": _fetchone(conn, "SELECT COUNT(*) as c FROM users")["c"],
+            "businesses": _fetchone(conn, "SELECT COUNT(*) as c FROM businesses")["c"],
+            "reviews": _fetchone(conn, "SELECT COUNT(*) as c FROM reviews")["c"],
+            "responses": _fetchone(conn, "SELECT COUNT(*) as c FROM responses")["c"],
         }
 
     dead = get_dead_letters()
@@ -1299,17 +1297,17 @@ async def debug_logs(request: Request, token: str = "", lines: int = 50):
     # Google API diagnostics
     google_diag = {}
     with db_connection() as conn:
-        u = conn.execute("SELECT id, email, google_access_token, google_refresh_token FROM users LIMIT 1").fetchone()
+        u = _fetchone(conn, "SELECT id, email, google_access_token, google_refresh_token FROM users LIMIT 1")
         if u:
-            token = u["google_access_token"] or ""
-            google_diag["has_access_token"] = bool(token)
+            tok = u["google_access_token"] or ""
+            google_diag["has_access_token"] = bool(tok)
             google_diag["has_refresh_token"] = bool(u["google_refresh_token"])
-            google_diag["token_preview"] = token[:20] + "..." if token else "none"
-            if token:
+            google_diag["token_preview"] = tok[:20] + "..." if tok else "none"
+            if tok:
                 try:
                     r = requests.get(
                         "https://mybusinessaccountmanagement.googleapis.com/v1/accounts",
-                        headers={"Authorization": f"Bearer {token}"},
+                        headers={"Authorization": f"Bearer {tok}"},
                         timeout=10,
                     )
                     google_diag["accounts_status"] = r.status_code
