@@ -1296,12 +1296,34 @@ async def debug_logs(request: Request, token: str = "", lines: int = 50):
 
     dead = get_dead_letters()
 
+    # Google API diagnostics
+    google_diag = {}
+    with db_connection() as conn:
+        u = conn.execute("SELECT id, email, google_access_token, google_refresh_token FROM users LIMIT 1").fetchone()
+        if u:
+            token = u["google_access_token"] or ""
+            google_diag["has_access_token"] = bool(token)
+            google_diag["has_refresh_token"] = bool(u["google_refresh_token"])
+            google_diag["token_preview"] = token[:20] + "..." if token else "none"
+            if token:
+                try:
+                    r = requests.get(
+                        "https://mybusinessaccountmanagement.googleapis.com/v1/accounts",
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=10,
+                    )
+                    google_diag["accounts_status"] = r.status_code
+                    google_diag["accounts_response"] = r.json()
+                except Exception as e:
+                    google_diag["accounts_error"] = str(e)
+
     return {
         "status": "ok",
         "db": db_stats,
         "recent_logs": log_lines[-lines:],
         "dead_letters": dead[-10:],
         "audit_errors": recent_errors,
+        "google_diag": google_diag,
     }
 
 
