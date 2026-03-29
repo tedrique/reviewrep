@@ -57,10 +57,13 @@ class DbConn:
             sql = sql.replace("date('now','-30 day')", "(CURRENT_DATE - INTERVAL '30 days')")
             sql = sql.replace("date('now','-60 day')", "(CURRENT_DATE - INTERVAL '60 days')")
             sql = sql.replace("date('now', 'start of month')", "date_trunc('month', CURRENT_DATE)")
-            sql = sql.replace("strftime('%s',", "EXTRACT(EPOCH FROM ")
+            sql = sql.replace("strftime('%s',", "EXTRACT(EPOCH FROM CAST(")
+            # Close the CAST with ::timestamp) after the column ref
+            import re
+            sql = re.sub(r"EXTRACT\(EPOCH FROM CAST\(\s*(\w+\.\w+)\)", r"EXTRACT(EPOCH FROM CAST(\1 AS TIMESTAMP))", sql)
             sql = sql.replace("strftime('%Y-%m-%d',", "TO_CHAR(")
             if "TO_CHAR(" in sql and "as d" in sql.lower():
-                sql = sql.replace(") as d", ", 'YYYY-MM-DD') as d")
+                sql = sql.replace(") as d", "::timestamp, 'YYYY-MM-DD') as d")
             # PG doesn't have rowid
             sql = sql.replace("ORDER BY rowid", "ORDER BY id")
             cur = self._conn.cursor()
